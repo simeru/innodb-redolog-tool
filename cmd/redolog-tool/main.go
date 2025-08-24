@@ -414,32 +414,6 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 		return event
 	})
 
-	// Set up mouse handler for details text view (right pane)
-	app.detailsText.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
-		if action == tview.MouseScrollUp {
-			// Scroll text up by manually adjusting scroll position
-			row, col := app.detailsText.GetScrollOffset()
-			newRow := row - 3
-			if newRow < 0 {
-				newRow = 0
-			}
-			app.detailsText.ScrollTo(newRow, col)
-			app.app.QueueUpdateDraw(func() {
-				// Force UI update
-			})
-			return tview.MouseConsumed, nil // Consume the event
-		} else if action == tview.MouseScrollDown {
-			// Scroll text down by manually adjusting scroll position
-			row, col := app.detailsText.GetScrollOffset()
-			app.detailsText.ScrollTo(row+3, col)
-			app.app.QueueUpdateDraw(func() {
-				// Force UI update
-			})
-			return tview.MouseConsumed, nil // Consume the event
-		}
-		return action, event
-	})
-
 	app.detailsText.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyUp:
