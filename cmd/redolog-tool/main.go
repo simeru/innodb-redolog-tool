@@ -1008,7 +1008,114 @@ func (app *RedoLogApp) extractParsedData(data string) string {
 		return ""
 	}
 	
-	return fmt.Sprintf("[gray]%s[white]", match[1])
+	parsedContent := match[1]
+	
+	// Parse innodb_record structure
+	if strings.Contains(parsedContent, "innodb_record=") {
+		return app.formatInnoDBRecord(parsedContent)
+	}
+	
+	// For other parsed content, format nicely
+	return app.formatGeneralParsedData(parsedContent)
+}
+
+// formatInnoDBRecord formats InnoDB record analysis with proper structure
+func (app *RedoLogApp) formatInnoDBRecord(content string) string {
+	var result []string
+	result = append(result, "[green]InnoDB Record Structure:[white]")
+	
+	// Extract innodb_record content
+	recordRe := regexp.MustCompile(`innodb_record=\[([^\]]+)\]`)
+	match := recordRe.FindStringSubmatch(content)
+	if match == nil {
+		return fmt.Sprintf("[gray]%s[white]", content)
+	}
+	
+	recordData := match[1]
+	
+	// Parse header_skip
+	if headerMatch := regexp.MustCompile(`header_skip=(\d+)`).FindStringSubmatch(recordData); headerMatch != nil {
+		result = append(result, fmt.Sprintf("  [green]Header Skip:[white] %s bytes", headerMatch[1]))
+	}
+	
+	// Parse field lengths if present
+	if lengthsMatch := regexp.MustCompile(`field_lengths=\[([^\]]+)\]`).FindStringSubmatch(recordData); lengthsMatch != nil {
+		lengths := strings.Split(lengthsMatch[1], " ")
+		result = append(result, "[green]Field Lengths:[white]")
+		for i, length := range lengths {
+			result = append(result, fmt.Sprintf("    [cyan]Field %d:[white] %s bytes", i, strings.TrimSpace(length)))
+		}
+	}
+	
+	// Parse individual fields (field1_type=value, field2_type=value, etc.)
+	fieldRe := regexp.MustCompile(`field(\d+)_([^=]+)=([^\s]+)`)
+	fieldMatches := fieldRe.FindAllStringSubmatch(recordData, -1)
+	
+	if len(fieldMatches) > 0 {
+		result = append(result, "[green]Field Values:[white]")
+		for _, fieldMatch := range fieldMatches {
+			fieldNum := fieldMatch[1]
+			fieldType := fieldMatch[2]
+			fieldValue := fieldMatch[3]
+			
+			// Format based on field type
+			switch fieldType {
+			case "tinyint":
+				result = append(result, fmt.Sprintf("    [cyan]Field %s (TINYINT):[white] %s", fieldNum, fieldValue))
+			case "int":
+				result = append(result, fmt.Sprintf("    [cyan]Field %s (INT):[white] %s", fieldNum, fieldValue))
+			case "varchar":
+				result = append(result, fmt.Sprintf("    [cyan]Field %s (VARCHAR):[white] [yellow]%s[white]", fieldNum, fieldValue))
+			case "bigint":
+				result = append(result, fmt.Sprintf("    [cyan]Field %s (BIGINT):[white] %s", fieldNum, fieldValue))
+			default:
+				result = append(result, fmt.Sprintf("    [cyan]Field %s (%s):[white] %s", fieldNum, strings.ToUpper(fieldType), fieldValue))
+			}
+		}
+	}
+	
+	// Parse remaining_hex if present
+	if hexMatch := regexp.MustCompile(`remaining_hex=([a-fA-F0-9]+)`).FindStringSubmatch(recordData); hexMatch != nil {
+		hexValue := hexMatch[1]
+		result = append(result, fmt.Sprintf("[green]Remaining Hex:[white] %s (%d bytes)", hexValue, len(hexValue)/2))
+	}
+	
+	return strings.Join(result, "\n")
+}
+
+// formatGeneralParsedData formats other types of parsed content
+func (app *RedoLogApp) formatGeneralParsedData(content string) string {
+	var result []string
+	
+	// Split by common separators and format each part
+	parts := regexp.MustCompile(`[,\s]+`).Split(content, -1)
+	
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		
+		// Check if it's a key=value pair
+		if strings.Contains(part, "=") {
+			keyValue := strings.SplitN(part, "=", 2)
+			if len(keyValue) == 2 {
+				key := strings.TrimSpace(keyValue[0])
+				value := strings.TrimSpace(keyValue[1])
+				result = append(result, fmt.Sprintf("[green]%s:[white] %s", strings.Title(key), value))
+			} else {
+				result = append(result, fmt.Sprintf("[gray]%s[white]", part))
+			}
+		} else {
+			result = append(result, fmt.Sprintf("[gray]%s[white]", part))
+		}
+	}
+	
+	if len(result) == 0 {
+		return fmt.Sprintf("[gray]%s[white]", content)
+	}
+	
+	return strings.Join(result, "\n")
 }
 
 // extractFieldsData extracts and formats field analysis
