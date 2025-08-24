@@ -89,20 +89,6 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	// Set up key bindings
 	app.recordList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
-		case tcell.KeyUp:
-			// Up arrow should go to previous record (smaller index)
-			current := app.recordList.GetCurrentItem()
-			if current > 0 {
-				app.recordList.SetCurrentItem(current - 1)
-			}
-			return nil
-		case tcell.KeyDown:
-			// Down arrow should go to next record (larger index)
-			current := app.recordList.GetCurrentItem()
-			if current < len(app.records)-1 {
-				app.recordList.SetCurrentItem(current + 1)
-			}
-			return nil
 		case tcell.KeyTab:
 			app.app.SetFocus(app.detailsText)
 			return nil
@@ -114,6 +100,12 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 			app.app.SetFocus(app.detailsText)
 			return nil
 		}
+		// Check for character keys
+		if event.Rune() == 'q' || event.Rune() == 'Q' {
+			app.app.Stop()
+			return nil
+		}
+		// Let tview handle arrow keys naturally
 		return event
 	})
 
@@ -137,6 +129,11 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 			app.app.SetFocus(app.recordList)
 			return nil
 		case tcell.KeyEscape:
+			app.app.Stop()
+			return nil
+		}
+		// Check for character keys
+		if event.Rune() == 'q' || event.Rune() == 'Q' {
 			app.app.Stop()
 			return nil
 		}
@@ -171,7 +168,7 @@ Total Records: %d
 ↑/↓: Navigate records (auto-update details)
 Tab: Switch panes  
 Enter: Focus details pane
-Esc: Exit
+Esc/q: Exit
 `,
 		app.header.LogGroupID,
 		app.header.StartLSN,
