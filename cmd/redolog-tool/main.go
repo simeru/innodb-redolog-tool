@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
@@ -609,13 +610,367 @@ func (app *RedoLogApp) showRecordDetails(index int) {
 		groupInfo)
 
 	if len(record.Data) > 0 {
-		details += fmt.Sprintf("%s (%d bytes)", string(record.Data), len(record.Data))
+		details += app.formatRecordData(string(record.Data))
 	} else {
 		details += "(empty)"
 	}
 
 	app.detailsText.SetText(details)
 	// Remove SetCurrentItem call to prevent infinite loop with SetChangedFunc
+}
+
+// formatRecordData formats the record data in a structured, readable way
+func (app *RedoLogApp) formatRecordData(data string) string {
+	if data == "" {
+		return "(empty)"
+	}
+	
+	result := fmt.Sprintf("\n[cyan]═══ RECORD DATA ANALYSIS (%d bytes) ═══[white]\n", len(data))
+	
+	// Parse different sections of the data
+	sections := app.parseDataSections(data)
+	
+	// Display each section with proper formatting
+	for _, section := range sections {
+		result += section
+	}
+	
+	// Add raw data at the end for reference
+	result += "\n[cyan]═══ RAW DATA ═══[white]\n"
+	result += fmt.Sprintf("[gray]%s[white]\n", data)
+	
+	return result
+}
+
+// parseDataSections breaks down the record data into logical sections
+func (app *RedoLogApp) parseDataSections(data string) []string {
+	var sections []string
+	
+	// Section 1: Basic Information
+	if strings.Contains(data, "space_id=") || strings.Contains(data, "page_no=") {
+		basicInfo := app.extractBasicInfo(data)
+		if basicInfo != "" {
+			sections = append(sections, fmt.Sprintf("\n[yellow]▶ BASIC INFORMATION[white]\n%s\n", basicInfo))
+		}
+	}
+	
+	// Section 2: Index Information
+	if strings.Contains(data, "index_info=") {
+		indexInfo := app.extractIndexInfo(data)
+		if indexInfo != "" {
+			sections = append(sections, fmt.Sprintf("\n[yellow]▶ INDEX INFORMATION[white]\n%s\n", indexInfo))
+		}
+	}
+	
+	// Section 3: Record Data (most detailed section)
+	if strings.Contains(data, "record_data=") {
+		recordData := app.extractRecordData(data)
+		if recordData != "" {
+			sections = append(sections, fmt.Sprintf("\n[yellow]▶ RECORD DATA DETAILS[white]\n%s\n", recordData))
+		}
+	}
+	
+	// Section 4: Hex Data
+	if strings.Contains(data, "data_hex=") {
+		hexData := app.extractHexData(data)
+		if hexData != "" {
+			sections = append(sections, fmt.Sprintf("\n[yellow]▶ HEX DATA[white]\n%s\n", hexData))
+		}
+	}
+	
+	// Section 5: Found Strings
+	if strings.Contains(data, "found_strings=") {
+		foundStrings := app.extractFoundStrings(data)
+		if foundStrings != "" {
+			sections = append(sections, fmt.Sprintf("\n[yellow]▶ EXTRACTED STRINGS[white]\n%s\n", foundStrings))
+		}
+	}
+	
+	// Section 6: Parsed Data
+	if strings.Contains(data, "parsed=") {
+		parsedData := app.extractParsedData(data)
+		if parsedData != "" {
+			sections = append(sections, fmt.Sprintf("\n[yellow]▶ PARSED ANALYSIS[white]\n%s\n", parsedData))
+		}
+	}
+	
+	// Section 7: Fields Information
+	if strings.Contains(data, "fields=") {
+		fieldsData := app.extractFieldsData(data)
+		if fieldsData != "" {
+			sections = append(sections, fmt.Sprintf("\n[yellow]▶ FIELD ANALYSIS[white]\n%s\n", fieldsData))
+		}
+	}
+	
+	// If no sections found, treat as general data
+	if len(sections) == 0 {
+		sections = append(sections, fmt.Sprintf("\n[yellow]▶ GENERAL DATA[white]\n[white]%s[white]\n", data))
+	}
+	
+	return sections
+}
+
+// extractBasicInfo extracts space_id, page_no, and similar basic information
+func (app *RedoLogApp) extractBasicInfo(data string) string {
+	var info []string
+	
+	// Extract space_id
+	if match := regexp.MustCompile(`space_id=(\d+)`).FindStringSubmatch(data); match != nil {
+		info = append(info, fmt.Sprintf("[green]Space ID:[white] %s", match[1]))
+	}
+	
+	// Extract page_no
+	if match := regexp.MustCompile(`page_no=(\d+)`).FindStringSubmatch(data); match != nil {
+		info = append(info, fmt.Sprintf("[green]Page Number:[white] %s", match[1]))
+	}
+	
+	return strings.Join(info, "\n")
+}
+
+// extractIndexInfo extracts index-related information
+func (app *RedoLogApp) extractIndexInfo(data string) string {
+	// Find index_info= section
+	re := regexp.MustCompile(`index_info=\(([^)]*)\)`)
+	match := re.FindStringSubmatch(data)
+	if match == nil {
+		return ""
+	}
+	
+	indexData := match[1]
+	var info []string
+	
+	// Parse n_fields
+	if match := regexp.MustCompile(`n_fields=(\d+)`).FindStringSubmatch(indexData); match != nil {
+		info = append(info, fmt.Sprintf("[green]Number of Fields:[white] %s", match[1]))
+	}
+	
+	// Parse n_uniq
+	if match := regexp.MustCompile(`n_uniq=(\d+)`).FindStringSubmatch(indexData); match != nil {
+		info = append(info, fmt.Sprintf("[green]Unique Fields:[white] %s", match[1]))
+	}
+	
+	// Parse instant_cols if present
+	if strings.Contains(indexData, "instant_cols=true") {
+		info = append(info, fmt.Sprintf("[green]Instant Columns:[white] [yellow]YES[white]"))
+	}
+	
+	// Parse n_instant_cols if present
+	if match := regexp.MustCompile(`n_instant_cols=(\d+)`).FindStringSubmatch(indexData); match != nil {
+		info = append(info, fmt.Sprintf("[green]Instant Column Count:[white] %s", match[1]))
+	}
+	
+	// Parse fields array
+	fieldsRe := regexp.MustCompile(`fields=\[([^\]]*)\]`)
+	if fieldsMatch := fieldsRe.FindStringSubmatch(indexData); fieldsMatch != nil {
+		info = append(info, "[green]Fields:[white]")
+		fieldsList := app.parseFieldsList(fieldsMatch[1])
+		info = append(info, fieldsList)
+	}
+	
+	return strings.Join(info, "\n")
+}
+
+// parseFieldsList parses the fields array and formats it nicely
+func (app *RedoLogApp) parseFieldsList(fieldsStr string) string {
+	if fieldsStr == "" {
+		return "  (none)"
+	}
+	
+	// Split by field entries (each field starts with field_)
+	fieldRe := regexp.MustCompile(`field_(\d+)\(([^)]*)\)`)
+	matches := fieldRe.FindAllStringSubmatch(fieldsStr, -1)
+	
+	if len(matches) == 0 {
+		return fmt.Sprintf("  [gray]%s[white]", fieldsStr)
+	}
+	
+	var fields []string
+	for _, match := range matches {
+		fieldNum := match[1]
+		fieldInfo := match[2]
+		
+		// Parse len and type info
+		var attributes []string
+		if lenMatch := regexp.MustCompile(`len=(\d+)`).FindStringSubmatch(fieldInfo); lenMatch != nil {
+			attributes = append(attributes, fmt.Sprintf("len=%s", lenMatch[1]))
+		}
+		if strings.Contains(fieldInfo, "NOT_NULL") {
+			attributes = append(attributes, "[red]NOT_NULL[white]")
+		} else if strings.Contains(fieldInfo, "NULLABLE") {
+			attributes = append(attributes, "[green]NULLABLE[white]")
+		}
+		
+		attrStr := strings.Join(attributes, ", ")
+		fields = append(fields, fmt.Sprintf("  [cyan]Field %s:[white] %s", fieldNum, attrStr))
+		
+		// Limit display to avoid overwhelming output
+		if len(fields) >= 10 {
+			remaining := len(matches) - 10
+			if remaining > 0 {
+				fields = append(fields, fmt.Sprintf("  [gray]... and %d more fields[white]", remaining))
+			}
+			break
+		}
+	}
+	
+	return strings.Join(fields, "\n")
+}
+
+// extractRecordData extracts and formats the record_data section
+func (app *RedoLogApp) extractRecordData(data string) string {
+	// Find record_data= section
+	re := regexp.MustCompile(`record_data=\(([^)]+(?:\([^)]*\)[^)]*)*)\)`)
+	match := re.FindStringSubmatch(data)
+	if match == nil {
+		return ""
+	}
+	
+	recordData := match[1]
+	var info []string
+	
+	// Parse various fields in record data
+	patterns := map[string]string{
+		"cursor_offset":         "[green]Cursor Offset:[white] %s",
+		"end_seg_len":          "[green]End Segment Length:[white] %s",
+		"info_bits":            "[green]Info Bits:[white] %s",
+		"origin_offset":        "[green]Origin Offset:[white] %s",
+		"mismatch_index":       "[green]Mismatch Index:[white] %s",
+		"debug_actualDataLen":  "[green]Actual Data Length:[white] %s bytes",
+		"debug_dataOffset":     "[green]Data Offset:[white] %s",
+		"debug_blockDataLen":   "[green]Block Data Length:[white] %s",
+		"cross_block_read":     "[green]Cross Block Read:[white] %s",
+	}
+	
+	for field, format := range patterns {
+		re := regexp.MustCompile(fmt.Sprintf(`%s=([^,)]+)`, field))
+		if match := re.FindStringSubmatch(recordData); match != nil {
+			value := match[1]
+			if field == "cross_block_read" && value == "success" {
+				value = "[green]SUCCESS[white]"
+			}
+			info = append(info, fmt.Sprintf(format, value))
+		}
+	}
+	
+	return strings.Join(info, "\n")
+}
+
+// extractHexData extracts and formats hex data
+func (app *RedoLogApp) extractHexData(data string) string {
+	re := regexp.MustCompile(`data_hex=([a-fA-F0-9]+)`)
+	match := re.FindStringSubmatch(data)
+	if match == nil {
+		return ""
+	}
+	
+	hexStr := match[1]
+	
+	// Format hex data in nice columns (16 bytes per line)
+	var formatted []string
+	formatted = append(formatted, fmt.Sprintf("[green]Length:[white] %d bytes", len(hexStr)/2))
+	formatted = append(formatted, "[green]Data:[white]")
+	
+	for i := 0; i < len(hexStr); i += 32 { // 32 hex chars = 16 bytes
+		end := i + 32
+		if end > len(hexStr) {
+			end = len(hexStr)
+		}
+		
+		line := hexStr[i:end]
+		// Add spaces every 2 characters for readability
+		var spaced []string
+		for j := 0; j < len(line); j += 2 {
+			spaced = append(spaced, line[j:j+2])
+		}
+		
+		addr := fmt.Sprintf("%04x:", i/2)
+		formatted = append(formatted, fmt.Sprintf("  [gray]%s[white] %s", addr, strings.Join(spaced, " ")))
+	}
+	
+	return strings.Join(formatted, "\n")
+}
+
+// extractFoundStrings extracts and formats found strings
+func (app *RedoLogApp) extractFoundStrings(data string) string {
+	re := regexp.MustCompile(`found_strings='([^']*)'`)
+	match := re.FindStringSubmatch(data)
+	if match == nil {
+		return ""
+	}
+	
+	strings_data := match[1]
+	
+	// Split by | separator and clean up
+	strings_list := strings.Split(strings_data, "|")
+	var formatted []string
+	
+	for i, s := range strings_list {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			formatted = append(formatted, fmt.Sprintf("[green]String %d:[white] [yellow]'%s'[white]", i+1, s))
+		}
+	}
+	
+	if len(formatted) == 0 {
+		return "[gray](no readable strings found)[white]"
+	}
+	
+	return strings.Join(formatted, "\n")
+}
+
+// extractParsedData extracts parsed analysis information
+func (app *RedoLogApp) extractParsedData(data string) string {
+	re := regexp.MustCompile(`parsed=\(([^)]+)\)`)
+	match := re.FindStringSubmatch(data)
+	if match == nil {
+		return ""
+	}
+	
+	return fmt.Sprintf("[gray]%s[white]", match[1])
+}
+
+// extractFieldsData extracts and formats field analysis
+func (app *RedoLogApp) extractFieldsData(data string) string {
+	re := regexp.MustCompile(`fields=\(([^)]+)\)`)
+	match := re.FindStringSubmatch(data)
+	if match == nil {
+		return ""
+	}
+	
+	fieldsData := match[1]
+	var info []string
+	
+	// Parse field entries
+	fieldRe := regexp.MustCompile(`field_(\d+)=([^,)]+)`)
+	matches := fieldRe.FindAllStringSubmatch(fieldsData, -1)
+	
+	for _, match := range matches {
+		fieldNum := match[1]
+		fieldValue := match[2]
+		
+		// Format different field types
+		if strings.Contains(fieldValue, "varchar=") {
+			varcharRe := regexp.MustCompile(`varchar='([^']*)'`)
+			if varcharMatch := varcharRe.FindStringSubmatch(fieldValue); varcharMatch != nil {
+				info = append(info, fmt.Sprintf("[green]Field %s (VARCHAR):[white] [yellow]'%s'[white]", fieldNum, varcharMatch[1]))
+			}
+		} else if strings.Contains(fieldValue, "int_") {
+			info = append(info, fmt.Sprintf("[green]Field %s (INTEGER):[white] %s", fieldNum, fieldValue))
+		} else if strings.Contains(fieldValue, "hex=") {
+			hexRe := regexp.MustCompile(`hex=([a-fA-F0-9]+)`)
+			if hexMatch := hexRe.FindStringSubmatch(fieldValue); hexMatch != nil {
+				info = append(info, fmt.Sprintf("[green]Field %s (HEX):[white] %s", fieldNum, hexMatch[1]))
+			}
+		} else {
+			info = append(info, fmt.Sprintf("[green]Field %s:[white] %s", fieldNum, fieldValue))
+		}
+	}
+	
+	if len(info) == 0 {
+		return fmt.Sprintf("[gray]%s[white]", fieldsData)
+	}
+	
+	return strings.Join(info, "\n")
 }
 
 func (app *RedoLogApp) Run() error {
