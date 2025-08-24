@@ -635,9 +635,16 @@ func (app *RedoLogApp) formatRecordData(data string) string {
 		result += section
 	}
 	
-	// Add raw data at the end for reference
-	result += "\n[cyan]═══ RAW DATA ═══[white]\n"
-	result += fmt.Sprintf("[gray]%s[white]\n", data)
+	// Add raw data at the end for reference (only if structured sections exist)
+	if len(sections) > 0 {
+		result += "\n[cyan]═══ RAW DATA (for reference) ═══[white]\n"
+		// Truncate very long raw data to avoid overwhelming display
+		if len(data) > 500 {
+			result += fmt.Sprintf("[gray]%s...[white]\n[gray](truncated - %d total chars)[white]\n", data[:500], len(data))
+		} else {
+			result += fmt.Sprintf("[gray]%s[white]\n", data)
+		}
+	}
 	
 	return result
 }
@@ -702,9 +709,15 @@ func (app *RedoLogApp) parseDataSections(data string) []string {
 		}
 	}
 	
-	// If no sections found, treat as general data
+	// If no structured sections found, try to parse as simple key-value pairs
 	if len(sections) == 0 {
-		sections = append(sections, fmt.Sprintf("\n[yellow]▶ GENERAL DATA[white]\n[white]%s[white]\n", data))
+		generalInfo := app.extractGeneralInfo(data)
+		if generalInfo != "" {
+			sections = append(sections, fmt.Sprintf("\n[yellow]▶ RECORD INFORMATION[white]\n%s\n", generalInfo))
+		} else {
+			// Only show raw data if nothing else can be parsed
+			sections = append(sections, fmt.Sprintf("\n[yellow]▶ UNSTRUCTURED DATA[white]\n[gray]%s[white]\n", data))
+		}
 	}
 	
 	return sections
@@ -722,6 +735,75 @@ func (app *RedoLogApp) extractBasicInfo(data string) string {
 	// Extract page_no
 	if match := regexp.MustCompile(`page_no=(\d+)`).FindStringSubmatch(data); match != nil {
 		info = append(info, fmt.Sprintf("[green]Page Number:[white] %s", match[1]))
+	}
+	
+	// Extract offset
+	if match := regexp.MustCompile(`offset=(\d+)`).FindStringSubmatch(data); match != nil {
+		info = append(info, fmt.Sprintf("[green]Offset:[white] %s", match[1]))
+	}
+	
+	// Extract badlen
+	if match := regexp.MustCompile(`badlen=(\d+)`).FindStringSubmatch(data); match != nil {
+		info = append(info, fmt.Sprintf("[green]Bad Length:[white] %s bytes", match[1]))
+	}
+	
+	// Extract hex values in basic section  
+	if match := regexp.MustCompile(`hex=([a-fA-F0-9]+)`).FindStringSubmatch(data); match != nil && !strings.Contains(data, "data_hex=") {
+		info = append(info, fmt.Sprintf("[green]Hex Value:[white] %s", match[1]))
+	}
+	
+	return strings.Join(info, "\n")
+}
+
+// extractGeneralInfo parses general key-value pairs that don't fit other categories
+func (app *RedoLogApp) extractGeneralInfo(data string) string {
+	var info []string
+	
+	// Common patterns to parse
+	patterns := map[string]string{
+		`offset=(\d+)`:           "[green]Offset:[white] %s",
+		`badlen=(\d+)`:           "[green]Bad Length:[white] %s bytes", 
+		`length=(\d+)`:           "[green]Length:[white] %s bytes",
+		`size=(\d+)`:             "[green]Size:[white] %s bytes",
+		`count=(\d+)`:            "[green]Count:[white] %s",
+		`type=(\w+)`:             "[green]Type:[white] %s",
+		`status=(\w+)`:           "[green]Status:[white] %s",
+		`flags?=([a-fA-F0-9x]+)`: "[green]Flags:[white] %s",
+		`id=(\d+)`:               "[green]ID:[white] %s",
+		`version=(\d+)`:          "[green]Version:[white] %s",
+	}
+	
+	for pattern, format := range patterns {
+		re := regexp.MustCompile(pattern)
+		if match := re.FindStringSubmatch(data); match != nil {
+			info = append(info, fmt.Sprintf(format, match[1]))
+		}
+	}
+	
+	// Parse hex values (but not data_hex which is handled elsewhere)
+	if !strings.Contains(data, "data_hex=") {
+		hexRe := regexp.MustCompile(`hex=([a-fA-F0-9]+)`)
+		if match := hexRe.FindStringSubmatch(data); match != nil {
+			hexValue := match[1]
+			// Format hex nicely if it's long
+			if len(hexValue) > 16 {
+				info = append(info, fmt.Sprintf("[green]Hex Data:[white] %s... (%d bytes)", hexValue[:16], len(hexValue)/2))
+			} else {
+				info = append(info, fmt.Sprintf("[green]Hex Data:[white] %s", hexValue))
+			}
+		}
+	}
+	
+	// Parse simple string values
+	stringRe := regexp.MustCompile(`(\w+)='([^']+)'`)
+	matches := stringRe.FindAllStringSubmatch(data, -1)
+	for _, match := range matches {
+		key := match[1]
+		value := match[2]
+		// Skip if already handled by other sections
+		if !strings.Contains(key, "found_strings") && !strings.Contains(key, "varchar") {
+			info = append(info, fmt.Sprintf("[green]%s:[white] [yellow]'%s'[white]", strings.Title(key), value))
+		}
 	}
 	
 	return strings.Join(info, "\n")
