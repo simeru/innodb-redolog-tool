@@ -93,21 +93,39 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 		}
 	})
 
+	// Set up mouse handler for better click support
+	app.recordList.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		if action == tview.MouseLeftClick {
+			// Handle mouse clicks manually to ensure they work
+			_, y := event.Position()
+			// Convert screen coordinates to list item index
+			_, _, _, height := app.recordList.GetRect()
+			if y >= 1 && y < height-1 && len(app.records) > 0 { // Account for borders
+				itemIndex := y - 1 // Subtract 1 for top border
+				if itemIndex >= 0 && itemIndex < len(app.records) {
+					app.recordList.SetCurrentItem(itemIndex)
+					return action, event
+				}
+			}
+		}
+		return action, event
+	})
+
 	// Set up key bindings
 	app.recordList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyUp:
-			// Up arrow should go to previous record (smaller index)
-			current := app.recordList.GetCurrentItem()
-			if current > 0 {
-				app.recordList.SetCurrentItem(current - 1)
-			}
-			return nil
-		case tcell.KeyDown:
-			// Down arrow should go to next record (larger index)
+			// Up arrow should go to next record (larger index) - fixing user expectation
 			current := app.recordList.GetCurrentItem()
 			if current < len(app.records)-1 {
 				app.recordList.SetCurrentItem(current + 1)
+			}
+			return nil
+		case tcell.KeyDown:
+			// Down arrow should go to previous record (smaller index) - fixing user expectation
+			current := app.recordList.GetCurrentItem()
+			if current > 0 {
+				app.recordList.SetCurrentItem(current - 1)
 			}
 			return nil
 		case tcell.KeyTab:
@@ -132,17 +150,17 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	app.detailsText.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyUp:
-			// Up arrow should go to previous record (smaller index)
-			current := app.recordList.GetCurrentItem()
-			if current > 0 {
-				app.recordList.SetCurrentItem(current - 1)
-			}
-			return nil
-		case tcell.KeyDown:
-			// Down arrow should go to next record (larger index)
+			// Up arrow should go to next record (larger index) - fixing user expectation
 			current := app.recordList.GetCurrentItem()
 			if current < len(app.records)-1 {
 				app.recordList.SetCurrentItem(current + 1)
+			}
+			return nil
+		case tcell.KeyDown:
+			// Down arrow should go to previous record (smaller index) - fixing user expectation
+			current := app.recordList.GetCurrentItem()
+			if current > 0 {
+				app.recordList.SetCurrentItem(current - 1)
 			}
 			return nil
 		case tcell.KeyTab:
@@ -244,7 +262,7 @@ func (app *RedoLogApp) showRecordDetails(index int) {
 	}
 
 	app.detailsText.SetText(details)
-	app.recordList.SetCurrentItem(index)
+	// Remove SetCurrentItem call to prevent infinite loop with SetChangedFunc
 }
 
 func (app *RedoLogApp) Run() error {
