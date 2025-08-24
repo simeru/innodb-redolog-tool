@@ -20,6 +20,7 @@ type RedoLogApp struct {
 	app           *tview.Application
 	recordList    *tview.List
 	detailsText   *tview.TextView
+	footer        *tview.TextView
 	records       []*types.LogRecord
 	filteredRecords []*types.LogRecord
 	recordIndices []int // Maps filtered index to original index
@@ -73,6 +74,29 @@ func main() {
 		fmt.Printf("Table ID 0 records (would be hidden): %d\n", tableID0Records)
 		fmt.Printf("Non-zero ID records (would be shown): %d\n", nonZeroIDRecords)
 		fmt.Printf("Filter effectiveness: %.1f%% reduction\n\n", float64(tableID0Records)/float64(totalRecords)*100)
+		
+		// Show footer simulation
+		fmt.Printf("Footer display simulation:\n")
+		// Simulate what would appear in the footer
+		showTableID0 := false // Default: filter ON
+		filteredRecords := make([]*types.LogRecord, 0)
+		for _, record := range records {
+			if !showTableID0 && record.TableID == 0 && record.SpaceID == 0 {
+				continue // Skip Table ID 0 records when filter is enabled
+			}
+			filteredRecords = append(filteredRecords, record)
+		}
+		
+		var filterStatus, filterColor string
+		if showTableID0 {
+			filterStatus = "OFF"
+			filterColor = "[green]"
+		} else {
+			filterStatus = "ON" 
+			filterColor = "[red]"
+		}
+		fmt.Printf("Footer: Press 's' to toggle Table ID 0 filter | Filter: %s%s | Records: %d/%d\n\n",
+			filterColor, filterStatus, len(filteredRecords), len(records))
 		
 		// Analyze multi-record groups
 		fmt.Printf("Multi-record group analysis:\n")
@@ -178,6 +202,14 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	app.detailsText.SetTitle(" Record Details ")
 	app.detailsText.SetDynamicColors(true)
 	app.detailsText.SetScrollable(true)
+
+	// Create footer (bottom pane)
+	app.footer = tview.NewTextView()
+	app.footer.SetBorder(true)
+	app.footer.SetTitle(" Filter Controls ")
+	app.footer.SetDynamicColors(true)
+	app.footer.SetTextAlign(tview.AlignCenter)
+	app.updateFooter()
 
 	// Initialize filtered records
 	app.updateFilteredRecords()
@@ -338,6 +370,8 @@ Tab: Switch panes
 Enter: Focus details pane
 s: Toggle Table ID 0 filter
 Esc/q: Exit
+
+[yellow]Footer Status:[white] %s
 `,
 		app.header.LogGroupID,
 		app.header.StartLSN,
@@ -352,6 +386,18 @@ Esc/q: Exit
 				return "[green]OFF (showing all)"
 			}
 			return "[red]ON (hiding Table ID 0)"
+		}(),
+		func() string {
+			var filterStatus, filterColor string
+			if app.showTableID0 {
+				filterStatus = "OFF"
+				filterColor = "[green]"
+			} else {
+				filterStatus = "ON"
+				filterColor = "[red]"
+			}
+			return fmt.Sprintf(`Press 's' to toggle filter | Filter: %s%s[white] | Records: [cyan]%d[white]/[blue]%d`,
+				filterColor, filterStatus, len(app.filteredRecords), len(app.records))
 		}())
 
 	app.detailsText.SetText(headerInfo)
@@ -420,15 +466,19 @@ func (app *RedoLogApp) showRecordDetails(index int) {
 }
 
 func (app *RedoLogApp) Run() error {
-	// Create main layout
-	flex := tview.NewFlex()
-	flex.AddItem(app.recordList, 0, 1, true)   // Left pane (1/3)
-	flex.AddItem(app.detailsText, 0, 2, false) // Right pane (2/3)
+	// Create main layout with footer
+	topFlex := tview.NewFlex()
+	topFlex.AddItem(app.recordList, 0, 1, true)   // Left pane (1/3)
+	topFlex.AddItem(app.detailsText, 0, 2, false) // Right pane (2/3)
+
+	mainFlex := tview.NewFlex().SetDirection(tview.FlexRow)
+	mainFlex.AddItem(topFlex, 0, 1, true)     // Top section (main content)
+	mainFlex.AddItem(app.footer, 3, 0, false) // Bottom section (footer, fixed 3 lines)
 
 	// Enable mouse support
 	app.app.EnableMouse(true)
 	
-	app.app.SetRoot(flex, true)
+	app.app.SetRoot(mainFlex, true)
 	app.app.SetFocus(app.recordList)
 
 	return app.app.Run()
@@ -612,6 +662,23 @@ func (app *RedoLogApp) rebuildRecordList() {
 	}
 }
 
+// updateFooter updates the footer display with current filter status
+func (app *RedoLogApp) updateFooter() {
+	var filterStatus, filterColor string
+	if app.showTableID0 {
+		filterStatus = "OFF"
+		filterColor = "[green]"
+	} else {
+		filterStatus = "ON"
+		filterColor = "[red]"
+	}
+
+	footerText := fmt.Sprintf(`[yellow]Press [white][bold]'s'[reset] [yellow]to toggle Table ID 0 filter[white] | Filter: %s%s[white] | Records: [cyan]%d[white]/[blue]%d`,
+		filterColor, filterStatus, len(app.filteredRecords), len(app.records))
+
+	app.footer.SetText(footerText)
+}
+
 // toggleTableID0Filter toggles the Table ID 0 filter and refreshes the display
 func (app *RedoLogApp) toggleTableID0Filter() {
 	app.showTableID0 = !app.showTableID0
@@ -624,6 +691,9 @@ func (app *RedoLogApp) toggleTableID0Filter() {
 	
 	// Update header info to show new filter status
 	app.showHeaderInfo()
+	
+	// Update footer
+	app.updateFooter()
 	
 	// Reset selection to first record if available
 	if len(app.filteredRecords) > 0 {
