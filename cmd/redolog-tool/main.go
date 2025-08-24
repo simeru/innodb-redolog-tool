@@ -75,6 +75,30 @@ func main() {
 		fmt.Printf("Non-zero ID records (would be shown): %d\n", nonZeroIDRecords)
 		fmt.Printf("Filter effectiveness: %.1f%% reduction\n\n", float64(tableID0Records)/float64(totalRecords)*100)
 		
+		// Show MLOG_REC_INSERT_8027 record analysis
+		fmt.Printf("MLOG_REC_INSERT_8027 record analysis:\n")
+		insertCount := 0
+		for i, record := range records {
+			if uint8(record.Type) == 9 { // MLOG_REC_INSERT_8027
+				fmt.Printf("Record %d: %s\n", i+1, record.Type.String())
+				fmt.Printf("  LSN: %d\n", record.LSN)
+				fmt.Printf("  Length: %d\n", record.Length)
+				fmt.Printf("  Space ID: %d\n", record.SpaceID)
+				fmt.Printf("  Page No: %d\n", record.PageNo)
+				fmt.Printf("  Data: %s\n", string(record.Data))
+				fmt.Printf("  Group: %d\n", record.MultiRecordGroup)
+				fmt.Printf("\n")
+				insertCount++
+				if insertCount >= 3 { // Limit to 3 records for readability
+					break
+				}
+			}
+		}
+		if insertCount == 0 {
+			fmt.Printf("No MLOG_REC_INSERT_8027 records found\n")
+		}
+		fmt.Printf("Found %d MLOG_REC_INSERT_8027 records\n\n", insertCount)
+		
 		// Show footer simulation
 		fmt.Printf("Footer display simulation:\n")
 		// Simulate what would appear in the footer

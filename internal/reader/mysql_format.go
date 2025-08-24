@@ -267,6 +267,181 @@ func parseCompressedUint64(data []byte) (value uint64, bytesRead int) {
 	return uint64(firstByte), 1
 }
 
+// parseMLOG_REC_INSERT_8027 parses MLOG_REC_INSERT_8027 record based on MySQL source analysis
+// Structure: Space ID (compressed) + Page Number (compressed) + Index Info + Record Data
+func (r *MySQLRedoLogReader) parseMLOG_REC_INSERT_8027() []byte {
+	startOffset := r.dataOffset
+	result := make([]string, 0)
+	
+	// Parse Space ID (compressed integer)
+	spaceID, spaceIDBytes := parseCompressedUint64(r.blockData[r.dataOffset:])
+	if spaceIDBytes == 0 {
+		return []byte("MLOG_REC_INSERT_8027: failed to parse space ID")
+	}
+	r.dataOffset += spaceIDBytes
+	result = append(result, fmt.Sprintf("space_id=%d", spaceID))
+	
+	// Parse Page Number (compressed integer)
+	pageNo, pageNoBytes := parseCompressedUint64(r.blockData[r.dataOffset:])
+	if pageNoBytes == 0 {
+		return []byte("MLOG_REC_INSERT_8027: failed to parse page number")
+	}
+	r.dataOffset += pageNoBytes
+	result = append(result, fmt.Sprintf("page_no=%d", pageNo))
+	
+	// Parse Index Information (mlog_parse_index_8027 format)
+	indexInfo := r.parseIndexInfo8027()
+	if len(indexInfo) > 0 {
+		result = append(result, indexInfo)
+	}
+	
+	// Parse Record Data portion
+	recordInfo := r.parseRecordData8027()
+	if len(recordInfo) > 0 {
+		result = append(result, recordInfo)
+	}
+	
+	// Add hex representation of the entire data for comparison
+	totalBytes := r.dataOffset - startOffset
+	if totalBytes > 0 && startOffset+totalBytes <= len(r.blockData) {
+		hexData := fmt.Sprintf("hex=%x", r.blockData[startOffset:r.dataOffset])
+		result = append(result, hexData)
+	}
+	
+	return []byte(strings.Join(result, " | "))
+}
+
+// parseIndexInfo8027 parses the index information part of MLOG_REC_INSERT_8027
+// Based on mlog_parse_index_8027 function from MySQL source
+func (r *MySQLRedoLogReader) parseIndexInfo8027() string {
+	if r.dataOffset+2 > len(r.blockData) {
+		return "index_info=insufficient_data"
+	}
+	
+	// Parse n_fields (2 bytes) - may contain instant columns flag
+	nFields := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
+	r.dataOffset += 2
+	
+	hasInstantCols := (nFields & 0x8000) != 0
+	actualNFields := nFields & 0x7FFF
+	
+	result := make([]string, 0)
+	result = append(result, fmt.Sprintf("n_fields=%d", actualNFields))
+	
+	if hasInstantCols {
+		result = append(result, "instant_cols=true")
+		// Parse additional instant column info if present
+		if r.dataOffset+2 <= len(r.blockData) {
+			nInstantCols := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
+			r.dataOffset += 2
+			result = append(result, fmt.Sprintf("n_instant_cols=%d", nInstantCols))
+			
+			// Parse actual n_fields if different
+			if r.dataOffset+2 <= len(r.blockData) {
+				actualNFields = binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
+				r.dataOffset += 2
+				result = append(result, fmt.Sprintf("actual_n_fields=%d", actualNFields))
+			}
+		}
+	}
+	
+	// Parse n_uniq (2 bytes)
+	if r.dataOffset+2 <= len(r.blockData) {
+		nUniq := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
+		r.dataOffset += 2
+		result = append(result, fmt.Sprintf("n_uniq=%d", nUniq))
+	}
+	
+	// Parse field descriptors (2 bytes each)
+	fieldCount := int(actualNFields)
+	if fieldCount > 50 { // Reasonable limit
+		fieldCount = 50
+	}
+	
+	fields := make([]string, 0)
+	for i := 0; i < fieldCount && r.dataOffset+2 <= len(r.blockData); i++ {
+		fieldDesc := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
+		r.dataOffset += 2
+		
+		fieldLen := fieldDesc & 0x7FFF
+		notNull := (fieldDesc & 0x8000) != 0
+		nullFlag := ""
+		if notNull {
+			nullFlag = "NOT_NULL"
+		} else {
+			nullFlag = "NULLABLE"
+		}
+		fields = append(fields, fmt.Sprintf("field_%d(len=%d,%s)", i, fieldLen, nullFlag))
+	}
+	
+	if len(fields) > 0 {
+		result = append(result, fmt.Sprintf("fields=[%s]", strings.Join(fields, ",")))
+	}
+	
+	return fmt.Sprintf("index_info=(%s)", strings.Join(result, ","))
+}
+
+// parseRecordData8027 parses the record data part of MLOG_REC_INSERT_8027
+// Based on page_cur_parse_insert_rec function from MySQL source
+func (r *MySQLRedoLogReader) parseRecordData8027() string {
+	result := make([]string, 0)
+	
+	// Parse cursor_offset (2 bytes) - may not always be present
+	if r.dataOffset+2 <= len(r.blockData) {
+		cursorOffset := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
+		r.dataOffset += 2
+		result = append(result, fmt.Sprintf("cursor_offset=%d", cursorOffset))
+	}
+	
+	// Parse end_seg_len (compressed integer)
+	endSegLen, endSegLenBytes := parseCompressedUint64(r.blockData[r.dataOffset:])
+	if endSegLenBytes == 0 {
+		return "record_data=parse_failed"
+	}
+	r.dataOffset += endSegLenBytes
+	result = append(result, fmt.Sprintf("end_seg_len=%d", endSegLen))
+	
+	// Check if there are info and status bits
+	if (endSegLen & 0x1) != 0 {
+		// Parse info_and_status_bits (1 byte)
+		if r.dataOffset+1 <= len(r.blockData) {
+			infoBits := r.blockData[r.dataOffset]
+			r.dataOffset += 1
+			result = append(result, fmt.Sprintf("info_bits=0x%02x", infoBits))
+		}
+		
+		// Parse origin_offset (compressed integer)
+		originOffset, originOffsetBytes := parseCompressedUint64(r.blockData[r.dataOffset:])
+		if originOffsetBytes > 0 {
+			r.dataOffset += originOffsetBytes
+			result = append(result, fmt.Sprintf("origin_offset=%d", originOffset))
+		}
+		
+		// Parse mismatch_index (compressed integer)
+		mismatchIndex, mismatchIndexBytes := parseCompressedUint64(r.blockData[r.dataOffset:])
+		if mismatchIndexBytes > 0 {
+			r.dataOffset += mismatchIndexBytes
+			result = append(result, fmt.Sprintf("mismatch_index=%d", mismatchIndex))
+		}
+	}
+	
+	// Parse actual record data
+	actualDataLen := int(endSegLen >> 1) // Shift right by 1 to get actual length
+	if actualDataLen > 0 && r.dataOffset+actualDataLen <= len(r.blockData) {
+		recordBytes := r.blockData[r.dataOffset:r.dataOffset+actualDataLen]
+		r.dataOffset += actualDataLen
+		
+		// Try to extract readable strings from record data
+		readableData := extractReadableStrings(recordBytes)
+		if len(readableData) > 0 {
+			result = append(result, fmt.Sprintf("data='%s'", readableData))
+		}
+		result = append(result, fmt.Sprintf("data_hex=%x", recordBytes))
+	}
+	
+	return fmt.Sprintf("record_data=(%s)", strings.Join(result, ","))
+}
+
 // parseValidRecord parses a record with a validated record type
 func (r *MySQLRedoLogReader) parseValidRecord(recordType uint8) (*types.LogRecord, error) {
 	// Parse record structure based on actual MySQL format discovered from source
@@ -352,7 +527,11 @@ func (r *MySQLRedoLogReader) parseValidRecord(recordType uint8) (*types.LogRecor
 				recordData = []byte("table_dynamic_meta_parse_failed")
 			}
 			
-		case 9, 13, 14: // INSERT, UPDATE, DELETE records
+		case 9: // MLOG_REC_INSERT_8027 - detailed parsing based on MySQL source analysis
+			recordData = r.parseMLOG_REC_INSERT_8027()
+			recordLength = uint32(len(recordData))
+			
+		case 13, 14: // UPDATE, DELETE records
 			// These often contain space_id and page_no
 			if remainingData >= 8 && r.dataOffset+8 <= len(r.blockData) {
 				spaceID = binary.LittleEndian.Uint32(r.blockData[r.dataOffset:r.dataOffset+4])
