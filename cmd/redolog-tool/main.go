@@ -56,11 +56,76 @@ func main() {
 		}
 		fmt.Printf("Found %d MLOG_TABLE_DYNAMIC_META records\n\n", count)
 		
-		// Show first 10 records with their Table IDs for comparison
-		fmt.Printf("First 10 records with Table IDs:\n")
-		for i := 0; i < 10 && i < len(records); i++ {
+		// Analyze multi-record groups
+		fmt.Printf("Multi-record group analysis:\n")
+		groupCount := 0
+		for i, record := range records {
+			if record.MultiRecordGroup > 0 {
+				if record.IsGroupStart {
+					groupCount++
+					fmt.Printf("Group %d starts at Record %d (%s)\n", record.MultiRecordGroup, i+1, record.Type.String())
+				}
+				if record.IsGroupEnd {
+					fmt.Printf("Group %d ends at Record %d (%s)\n", record.MultiRecordGroup, i+1, record.Type.String())
+				}
+			}
+		}
+		fmt.Printf("Found %d multi-record groups\n\n", groupCount)
+		
+		// Show MLOG_MULTI_REC_END records and their context
+		fmt.Printf("MLOG_MULTI_REC_END records (type 31) for group detection:\n")
+		multiRecEndCount := 0
+		for i, record := range records {
+			if uint8(record.Type) == 31 { // MLOG_MULTI_REC_END
+				fmt.Printf("Record %d: MLOG_MULTI_REC_END Group=%d IsGroupEnd=%v\n", i+1, record.MultiRecordGroup, record.IsGroupEnd)
+				multiRecEndCount++
+				if multiRecEndCount >= 5 { // Limit output
+					break
+				}
+			}
+		}
+		fmt.Printf("Found %d MLOG_MULTI_REC_END records total\n\n", multiRecEndCount)
+		
+		// Show visual group representation (like in TUI)
+		fmt.Printf("Visual group representation (first 20 records):\n")
+		groupColors := []string{"[white]", "[cyan]", "[yellow]", "[green]", "[magenta]", "[blue]"}
+		for i := 0; i < 20 && i < len(records); i++ {
 			record := records[i]
-			fmt.Printf("Record %d: %s TableID=%d SpaceID=%d\n", i+1, record.Type.String(), record.TableID, record.SpaceID)
+			recordNum := fmt.Sprintf("%d", i+1)
+			recordType := record.Type.String()
+			
+			// Add visual grouping indicators like in TUI
+			var groupIndicator string
+			var colorPrefix string
+			
+			if record.MultiRecordGroup > 0 {
+				// Use different colors for different groups
+				colorIndex := (record.MultiRecordGroup - 1) % len(groupColors)
+				colorPrefix = groupColors[colorIndex]
+				
+				if record.IsGroupStart {
+					groupIndicator = "┌─ "
+				} else if record.IsGroupEnd {
+					groupIndicator = "└─ "
+				} else {
+					groupIndicator = "├─ "
+				}
+			} else {
+				colorPrefix = "[white]"
+				groupIndicator = "   "
+			}
+			
+			// Show SpaceID if available, otherwise TableID
+			var idInfo string
+			if record.SpaceID != 0 {
+				idInfo = fmt.Sprintf("(S:%d)", record.SpaceID)
+			} else if record.TableID != 0 {
+				idInfo = fmt.Sprintf("(T:%d)", record.TableID)
+			} else {
+				idInfo = "(0)"
+			}
+			
+			fmt.Printf("%s%s%-6s %s%s Group=%d\n", colorPrefix, groupIndicator, recordNum, recordType, idInfo, record.MultiRecordGroup)
 		}
 		return
 	}
