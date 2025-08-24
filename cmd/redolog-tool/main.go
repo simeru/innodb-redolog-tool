@@ -86,6 +86,13 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 		}
 	})
 
+	// Set up click handler (automatic update on mouse click selection)
+	app.recordList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
+		if index < len(app.records) {
+			app.showRecordDetails(index)
+		}
+	})
+
 	// Set up key bindings
 	app.recordList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
