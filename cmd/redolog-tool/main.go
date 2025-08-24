@@ -303,7 +303,7 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	// Create footer (bottom pane)
 	app.footer = tview.NewTextView()
 	app.footer.SetBorder(true)
-	app.footer.SetTitle(" Filter Controls ")
+	app.footer.SetTitle(" Controls & Navigation ")
 	app.footer.SetDynamicColors(true)
 	app.footer.SetTextAlign(tview.AlignCenter)
 	app.updateFooter()
@@ -415,18 +415,38 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	app.detailsText.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyUp:
-			// Up arrow should go to previous record (smaller index) - natural list navigation
-			current := app.recordList.GetCurrentItem()
-			if current > 0 {
-				app.recordList.SetCurrentItem(current - 1)
+			// In details pane, Up arrow scrolls the text view up (not record navigation)
+			row, col := app.detailsText.GetScrollOffset()
+			if row > 0 {
+				app.detailsText.ScrollTo(row-1, col)
 			}
 			return nil
 		case tcell.KeyDown:
-			// Down arrow should go to next record (larger index) - natural list navigation
-			current := app.recordList.GetCurrentItem()
-			if current < len(app.filteredRecords)-1 {
-				app.recordList.SetCurrentItem(current + 1)
+			// In details pane, Down arrow scrolls the text view down (not record navigation)
+			row, col := app.detailsText.GetScrollOffset()
+			app.detailsText.ScrollTo(row+1, col)
+			return nil
+		case tcell.KeyPgUp:
+			// Page Up scrolls up by larger increment
+			row, col := app.detailsText.GetScrollOffset()
+			newRow := row - 10
+			if newRow < 0 {
+				newRow = 0
 			}
+			app.detailsText.ScrollTo(newRow, col)
+			return nil
+		case tcell.KeyPgDn:
+			// Page Down scrolls down by larger increment
+			row, col := app.detailsText.GetScrollOffset()
+			app.detailsText.ScrollTo(row+10, col)
+			return nil
+		case tcell.KeyHome:
+			// Home scrolls to top
+			app.detailsText.ScrollToBeginning()
+			return nil
+		case tcell.KeyEnd:
+			// End scrolls to bottom
+			app.detailsText.ScrollToEnd()
 			return nil
 		case tcell.KeyTab:
 			app.app.SetFocus(app.recordList)
@@ -845,7 +865,7 @@ func (app *RedoLogApp) updateFooter() {
 		opFilterText = "[white]ALL"
 	}
 
-	footerText := fmt.Sprintf(`[yellow]Keys: [bold]'s'[reset][yellow]=Table ID 0, [bold]'i'[reset][yellow]=INSERT, [bold]'u'[reset][yellow]=UPDATE, [bold]'d'[reset][yellow]=DELETE [white]| Filters: Table ID 0=%s%s[white] Op=%s[white] | Records: [cyan]%d[white]/[blue]%d`,
+	footerText := fmt.Sprintf(`[yellow]Keys: [bold]'s'[reset][yellow]=Table ID 0, [bold]'i'[reset][yellow]=INSERT, [bold]'u'[reset][yellow]=UPDATE, [bold]'d'[reset][yellow]=DELETE, [bold]Tab[reset][yellow]=Switch Panes [white]| Filters: Table ID 0=%s%s[white] Op=%s[white] | Records: [cyan]%d[white]/[blue]%d`,
 		filterColor, filterStatus, opFilterText, len(app.filteredRecords), len(app.records))
 
 	app.footer.SetText(footerText)
