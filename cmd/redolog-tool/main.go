@@ -299,6 +299,8 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	app.detailsText.SetTitle(" Record Details ")
 	app.detailsText.SetDynamicColors(true)
 	app.detailsText.SetScrollable(true)
+	app.detailsText.SetWrap(true)
+	app.detailsText.SetWordWrap(true)
 
 	// Create footer (bottom pane)
 	app.footer = tview.NewTextView()
@@ -415,39 +417,23 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	app.detailsText.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyUp:
-			// In details pane, Up arrow scrolls the text view up (not record navigation)
-			row, col := app.detailsText.GetScrollOffset()
-			if row > 0 {
-				app.detailsText.ScrollTo(row-1, col)
-			}
-			return nil
+			// Allow default TextView scrolling behavior for up arrow
+			return event
 		case tcell.KeyDown:
-			// In details pane, Down arrow scrolls the text view down (not record navigation)
-			row, col := app.detailsText.GetScrollOffset()
-			app.detailsText.ScrollTo(row+1, col)
-			return nil
+			// Allow default TextView scrolling behavior for down arrow
+			return event
 		case tcell.KeyPgUp:
-			// Page Up scrolls up by larger increment
-			row, col := app.detailsText.GetScrollOffset()
-			newRow := row - 10
-			if newRow < 0 {
-				newRow = 0
-			}
-			app.detailsText.ScrollTo(newRow, col)
-			return nil
+			// Allow default TextView scrolling behavior for Page Up
+			return event
 		case tcell.KeyPgDn:
-			// Page Down scrolls down by larger increment
-			row, col := app.detailsText.GetScrollOffset()
-			app.detailsText.ScrollTo(row+10, col)
-			return nil
+			// Allow default TextView scrolling behavior for Page Down
+			return event
 		case tcell.KeyHome:
-			// Home scrolls to top
-			app.detailsText.ScrollToBeginning()
-			return nil
+			// Allow default TextView scrolling behavior for Home
+			return event
 		case tcell.KeyEnd:
-			// End scrolls to bottom
-			app.detailsText.ScrollToEnd()
-			return nil
+			// Allow default TextView scrolling behavior for End
+			return event
 		case tcell.KeyTab:
 			app.app.SetFocus(app.recordList)
 			return nil
@@ -476,6 +462,7 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 			app.toggleOperationFilter("delete")
 			return nil
 		}
+		// For other keys (including j/k for vim-style scrolling), pass through
 		return event
 	})
 
