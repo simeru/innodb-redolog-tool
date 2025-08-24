@@ -79,8 +79,8 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 		app.recordList.AddItem(listItem, "", 0, nil)
 	}
 
-	// Set up selection handler
-	app.recordList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
+	// Set up selection change handler (automatic update on arrow key selection)
+	app.recordList.SetChangedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
 		if index < len(app.records) {
 			app.showRecordDetails(index)
 		}
@@ -89,6 +89,20 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	// Set up key bindings
 	app.recordList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
+		case tcell.KeyUp:
+			// Up arrow should go to previous record (smaller index)
+			current := app.recordList.GetCurrentItem()
+			if current > 0 {
+				app.recordList.SetCurrentItem(current - 1)
+			}
+			return nil
+		case tcell.KeyDown:
+			// Down arrow should go to next record (larger index)
+			current := app.recordList.GetCurrentItem()
+			if current < len(app.records)-1 {
+				app.recordList.SetCurrentItem(current + 1)
+			}
+			return nil
 		case tcell.KeyTab:
 			app.app.SetFocus(app.detailsText)
 			return nil
@@ -96,10 +110,8 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 			app.app.Stop()
 			return nil
 		case tcell.KeyEnter:
-			index := app.recordList.GetCurrentItem()
-			if index < len(app.records) {
-				app.showRecordDetails(index)
-			}
+			// Enter now just switches to details pane since selection auto-updates
+			app.app.SetFocus(app.detailsText)
 			return nil
 		}
 		return event
@@ -107,6 +119,20 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 
 	app.detailsText.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
+		case tcell.KeyUp:
+			// Up arrow should go to previous record (smaller index)
+			current := app.recordList.GetCurrentItem()
+			if current > 0 {
+				app.recordList.SetCurrentItem(current - 1)
+			}
+			return nil
+		case tcell.KeyDown:
+			// Down arrow should go to next record (larger index)
+			current := app.recordList.GetCurrentItem()
+			if current < len(app.records)-1 {
+				app.recordList.SetCurrentItem(current + 1)
+			}
+			return nil
 		case tcell.KeyTab:
 			app.app.SetFocus(app.recordList)
 			return nil
@@ -142,9 +168,9 @@ Format: %d
 Total Records: %d
 
 [blue]Navigation:[white]
-↑/↓: Navigate records
+↑/↓: Navigate records (auto-update details)
 Tab: Switch panes  
-Enter: Select record
+Enter: Focus details pane
 Esc: Exit
 `,
 		app.header.LogGroupID,
