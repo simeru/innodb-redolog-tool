@@ -21,7 +21,10 @@ type RedoLogApp struct {
 	recordList    *tview.List
 	detailsText   *tview.TextView
 	records       []*types.LogRecord
+	filteredRecords []*types.LogRecord
+	recordIndices []int // Maps filtered index to original index
 	header        *types.RedoLogHeader
+	showTableID0  bool // Toggle for showing Table ID 0 records
 }
 
 func main() {
@@ -55,6 +58,21 @@ func main() {
 			}
 		}
 		fmt.Printf("Found %d MLOG_TABLE_DYNAMIC_META records\n\n", count)
+		
+		// Show filtering statistics
+		fmt.Printf("Filtering analysis:\n")
+		totalRecords := len(records)
+		tableID0Records := 0
+		for _, record := range records {
+			if record.TableID == 0 && record.SpaceID == 0 {
+				tableID0Records++
+			}
+		}
+		nonZeroIDRecords := totalRecords - tableID0Records
+		fmt.Printf("Total records: %d\n", totalRecords)
+		fmt.Printf("Table ID 0 records (would be hidden): %d\n", tableID0Records)
+		fmt.Printf("Non-zero ID records (would be shown): %d\n", nonZeroIDRecords)
+		fmt.Printf("Filter effectiveness: %.1f%% reduction\n\n", float64(tableID0Records)/float64(totalRecords)*100)
 		
 		// Analyze multi-record groups
 		fmt.Printf("Multi-record group analysis:\n")
@@ -142,6 +160,7 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	app := &RedoLogApp{
 		records: records,
 		header:  header,
+		showTableID0: false, // Default: hide Table ID 0 records
 	}
 
 	// Create main application
@@ -160,59 +179,22 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	app.detailsText.SetDynamicColors(true)
 	app.detailsText.SetScrollable(true)
 
+	// Initialize filtered records
+	app.updateFilteredRecords()
+	
 	// Populate record list with multi-record group visualization
-	groupColors := []string{"[white]", "[cyan]", "[yellow]", "[green]", "[magenta]", "[blue]"}
-	for i, record := range records {
-		recordNum := fmt.Sprintf("%d", i+1)
-		recordType := record.Type.String()
-		// This variable is now replaced by idInfo below
-		
-		// Add visual grouping indicators
-		var groupIndicator string
-		var colorPrefix string
-		
-		if record.MultiRecordGroup > 0 {
-			// Use different colors for different groups
-			colorIndex := (record.MultiRecordGroup - 1) % len(groupColors)
-			colorPrefix = groupColors[colorIndex]
-			
-			if record.IsGroupStart {
-				groupIndicator = "┌─ "
-			} else if record.IsGroupEnd {
-				groupIndicator = "└─ "
-			} else {
-				groupIndicator = "├─ "
-			}
-		} else {
-			colorPrefix = "[white]"
-			groupIndicator = "   "
-		}
-		
-		// Show SpaceID if available, otherwise TableID
-		var idInfo string
-		if record.SpaceID != 0 {
-			idInfo = fmt.Sprintf("(S:%d)", record.SpaceID) // Space ID
-		} else if record.TableID != 0 {
-			idInfo = fmt.Sprintf("(T:%d)", record.TableID) // Table ID
-		} else {
-			idInfo = "(0)" // Default
-		}
-		
-		listItem := fmt.Sprintf("%s%s%-6s %s%s", colorPrefix, groupIndicator, recordNum, recordType, idInfo)
-		
-		app.recordList.AddItem(listItem, "", 0, nil)
-	}
+	app.rebuildRecordList()
 
 	// Set up selection change handler (automatic update on arrow key selection)
 	app.recordList.SetChangedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
-		if index < len(app.records) {
+		if index < len(app.filteredRecords) {
 			app.showRecordDetails(index)
 		}
 	})
 
 	// Set up click handler (automatic update on mouse click selection)
 	app.recordList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
-		if index < len(app.records) {
+		if index < len(app.filteredRecords) {
 			app.showRecordDetails(index)
 		}
 	})
@@ -224,9 +206,9 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 			_, y := event.Position()
 			// Convert screen coordinates to list item index
 			_, _, _, height := app.recordList.GetRect()
-			if y >= 1 && y < height-1 && len(app.records) > 0 { // Account for borders
+			if y >= 1 && y < height-1 && len(app.filteredRecords) > 0 { // Account for borders
 				itemIndex := y - 1 // Subtract 1 for top border
-				if itemIndex >= 0 && itemIndex < len(app.records) {
+				if itemIndex >= 0 && itemIndex < len(app.filteredRecords) {
 					app.recordList.SetCurrentItem(itemIndex)
 					return action, event
 				}
@@ -241,7 +223,7 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 		} else if action == tview.MouseScrollDown {
 			// Scroll down - move to next record
 			current := app.recordList.GetCurrentItem()
-			if current < len(app.records)-1 {
+			if current < len(app.filteredRecords)-1 {
 				app.recordList.SetCurrentItem(current + 1)
 			}
 			return action, event
@@ -262,7 +244,7 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 		case tcell.KeyDown:
 			// Down arrow should go to next record (larger index) - natural list navigation
 			current := app.recordList.GetCurrentItem()
-			if current < len(app.records)-1 {
+			if current < len(app.filteredRecords)-1 {
 				app.recordList.SetCurrentItem(current + 1)
 			}
 			return nil
@@ -282,6 +264,10 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 			app.app.Stop()
 			return nil
 		}
+		if event.Rune() == 's' || event.Rune() == 'S' {
+			app.toggleTableID0Filter()
+			return nil
+		}
 		return event
 	})
 
@@ -297,7 +283,7 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 		case tcell.KeyDown:
 			// Down arrow should go to next record (larger index) - natural list navigation
 			current := app.recordList.GetCurrentItem()
-			if current < len(app.records)-1 {
+			if current < len(app.filteredRecords)-1 {
 				app.recordList.SetCurrentItem(current + 1)
 			}
 			return nil
@@ -313,6 +299,10 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 			app.app.Stop()
 			return nil
 		}
+		if event.Rune() == 's' || event.Rune() == 'S' {
+			app.toggleTableID0Filter()
+			return nil
+		}
 		return event
 	})
 
@@ -320,7 +310,7 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	app.showHeaderInfo()
 
 	// Show first record if available
-	if len(records) > 0 {
+	if len(app.filteredRecords) > 0 {
 		app.showRecordDetails(0)
 		app.recordList.SetCurrentItem(0)
 	}
@@ -339,11 +329,14 @@ Last Checkpoint: %d
 Format: %d
 
 Total Records: %d
+Filtered Records: %d
+Table ID 0 Filter: %s
 
 [blue]Navigation:[white]
 ↑/↓: Navigate records (auto-update details)
 Tab: Switch panes  
 Enter: Focus details pane
+s: Toggle Table ID 0 filter
 Esc/q: Exit
 `,
 		app.header.LogGroupID,
@@ -352,17 +345,25 @@ Esc/q: Exit
 		app.header.Created.Format("2006-01-02 15:04:05"),
 		app.header.LastCheckpoint,
 		app.header.Format,
-		len(app.records))
+		len(app.records),
+		len(app.filteredRecords),
+		func() string {
+			if app.showTableID0 {
+				return "[green]OFF (showing all)"
+			}
+			return "[red]ON (hiding Table ID 0)"
+		}())
 
 	app.detailsText.SetText(headerInfo)
 }
 
 func (app *RedoLogApp) showRecordDetails(index int) {
-	if index >= len(app.records) {
+	if index >= len(app.filteredRecords) {
 		return
 	}
 
-	record := app.records[index]
+	record := app.filteredRecords[index]
+	originalIndex := app.recordIndices[index]
 	
 	// Add group information to details
 	var groupInfo string
@@ -394,7 +395,7 @@ func (app *RedoLogApp) showRecordDetails(index int) {
 %s
 [green]Data:[white]
 `,
-		index+1,
+		originalIndex+1,
 		record.Type.String(),
 		record.LSN,
 		record.Length,
@@ -546,4 +547,87 @@ func createReader(filename string, verbose bool) (reader.RedoLogReader, error) {
 		fmt.Printf("Using test format reader\n")
 	}
 	return reader.NewRedoLogReader(), nil
+}
+
+// updateFilteredRecords applies the current filter settings
+func (app *RedoLogApp) updateFilteredRecords() {
+	app.filteredRecords = make([]*types.LogRecord, 0)
+	app.recordIndices = make([]int, 0)
+	
+	for i, record := range app.records {
+		// Apply Table ID 0 filter
+		if !app.showTableID0 && record.TableID == 0 && record.SpaceID == 0 {
+			continue // Skip Table ID 0 records when filter is enabled
+		}
+		
+		app.filteredRecords = append(app.filteredRecords, record)
+		app.recordIndices = append(app.recordIndices, i)
+	}
+}
+
+// rebuildRecordList rebuilds the record list with current filtered records
+func (app *RedoLogApp) rebuildRecordList() {
+	app.recordList.Clear()
+	
+	groupColors := []string{"[white]", "[cyan]", "[yellow]", "[green]", "[magenta]", "[blue]"}
+	for i, record := range app.filteredRecords {
+		originalIndex := app.recordIndices[i]
+		recordNum := fmt.Sprintf("%d", originalIndex+1)
+		recordType := record.Type.String()
+		
+		// Add visual grouping indicators
+		var groupIndicator string
+		var colorPrefix string
+		
+		if record.MultiRecordGroup > 0 {
+			// Use different colors for different groups
+			colorIndex := (record.MultiRecordGroup - 1) % len(groupColors)
+			colorPrefix = groupColors[colorIndex]
+			
+			if record.IsGroupStart {
+				groupIndicator = "┌─ "
+			} else if record.IsGroupEnd {
+				groupIndicator = "└─ "
+			} else {
+				groupIndicator = "├─ "
+			}
+		} else {
+			colorPrefix = "[white]"
+			groupIndicator = "   "
+		}
+		
+		// Show SpaceID if available, otherwise TableID
+		var idInfo string
+		if record.SpaceID != 0 {
+			idInfo = fmt.Sprintf("(S:%d)", record.SpaceID) // Space ID
+		} else if record.TableID != 0 {
+			idInfo = fmt.Sprintf("(T:%d)", record.TableID) // Table ID
+		} else {
+			idInfo = "(0)" // Default
+		}
+		
+		listItem := fmt.Sprintf("%s%s%-6s %s%s", colorPrefix, groupIndicator, recordNum, recordType, idInfo)
+		
+		app.recordList.AddItem(listItem, "", 0, nil)
+	}
+}
+
+// toggleTableID0Filter toggles the Table ID 0 filter and refreshes the display
+func (app *RedoLogApp) toggleTableID0Filter() {
+	app.showTableID0 = !app.showTableID0
+	
+	// Update filtered records
+	app.updateFilteredRecords()
+	
+	// Rebuild the record list
+	app.rebuildRecordList()
+	
+	// Update header info to show new filter status
+	app.showHeaderInfo()
+	
+	// Reset selection to first record if available
+	if len(app.filteredRecords) > 0 {
+		app.recordList.SetCurrentItem(0)
+		app.showRecordDetails(0)
+	}
 }
