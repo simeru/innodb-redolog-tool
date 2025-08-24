@@ -150,29 +150,46 @@ func (r *MySQLRedoLogReader) readBlockHeader() (*MySQLLogBlockHeader, error) {
 
 // ReadRecord reads the next log record
 func (r *MySQLRedoLogReader) ReadRecord() (*types.LogRecord, error) {
-	// If we need to read a new block
-	if r.dataOffset >= len(r.blockData) || r.dataOffset == 0 {
-		err := r.readNextBlock()
-		if err != nil {
-			return nil, err
+	// Search for a valid record type across blocks if needed
+	for {
+		// If we need to read a new block
+		if r.dataOffset >= len(r.blockData) || r.dataOffset == 0 {
+			err := r.readNextBlock()
+			if err != nil {
+				return nil, err
+			}
 		}
+
+		// Search for a valid record type in the current block
+		for r.dataOffset < len(r.blockData) {
+			// Check if we have enough data for a basic record (at least 2 bytes)
+			if r.dataOffset+2 > len(r.blockData) {
+				// Need to read next block
+				break
+			}
+
+			// Read potential record type (first byte)
+			recordType := r.blockData[r.dataOffset]
+			
+			// Validate that this is a valid MySQL mlog_id_t value (1-76, excluding 0)
+			if recordType == 0 || recordType > 76 {
+				// Skip this byte and continue searching for valid record type
+				r.dataOffset++
+				continue
+			}
+
+			// Found a valid record type, advance offset and continue parsing
+			r.dataOffset++
+			return r.parseValidRecord(recordType)
+		}
+		
+		// If we reach here, we need to read the next block
+		r.dataOffset = len(r.blockData)
 	}
+}
 
-	// Try to parse a log record from current position
-	if r.dataOffset >= len(r.blockData) {
-		return nil, io.EOF
-	}
-
-	// Parse log records using simplified MySQL redo log structure
-	// Check if we have enough data for a basic record (at least 2 bytes)
-	if r.dataOffset+2 > len(r.blockData) {
-		return nil, io.EOF
-	}
-
-	// Read record type (first byte)
-	recordType := r.blockData[r.dataOffset]
-	r.dataOffset++
-
+// parseValidRecord parses a record with a validated record type
+func (r *MySQLRedoLogReader) parseValidRecord(recordType uint8) (*types.LogRecord, error) {
 	// Parse record structure based on actual MySQL format discovered from source
 	var recordLength uint32 = 1
 	var spaceID uint32 = 0
@@ -186,7 +203,7 @@ func (r *MySQLRedoLogReader) ReadRecord() (*types.LogRecord, error) {
 		switch recordType {
 		case 1, 2, 4, 8: // MLOG_1BYTE, 2BYTES, 4BYTES, 8BYTES
 			// Format from mlog_parse_nbytes: offset(2) + compressed_value
-			if remainingData >= 4 {
+			if remainingData >= 6 && r.dataOffset+6 <= len(r.blockData) {
 				offset := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
 				r.dataOffset += 2
 				
@@ -200,7 +217,7 @@ func (r *MySQLRedoLogReader) ReadRecord() (*types.LogRecord, error) {
 			
 		case 9, 13, 14: // INSERT, UPDATE, DELETE records
 			// These often contain space_id and page_no
-			if remainingData >= 8 {
+			if remainingData >= 8 && r.dataOffset+8 <= len(r.blockData) {
 				spaceID = binary.LittleEndian.Uint32(r.blockData[r.dataOffset:r.dataOffset+4])
 				r.dataOffset += 4
 				pageNo = binary.LittleEndian.Uint32(r.blockData[r.dataOffset:r.dataOffset+4])
@@ -208,22 +225,28 @@ func (r *MySQLRedoLogReader) ReadRecord() (*types.LogRecord, error) {
 				recordLength += 8
 				
 				// Try to parse additional data as potential string/row data
-				if remainingData > 8 {
-					extraDataLen := remainingData - 8
+				remainingAfterSpacePage := len(r.blockData) - r.dataOffset
+				if remainingAfterSpacePage > 0 {
+					extraDataLen := remainingAfterSpacePage
 					if extraDataLen > 128 { // Limit to reasonable size
 						extraDataLen = 128
 					}
 					
-					extraData := r.blockData[r.dataOffset:r.dataOffset+extraDataLen]
-					r.dataOffset += extraDataLen
-					recordLength += uint32(extraDataLen)
-					
-					// Try to extract readable strings from the data
-					readableData := extractReadableStrings(extraData)
-					if len(readableData) > 0 {
-						recordData = []byte(fmt.Sprintf("space=%d page=%d data=%s", spaceID, pageNo, readableData))
+					// Ensure we don't read beyond blockData bounds
+					if r.dataOffset+extraDataLen <= len(r.blockData) {
+						extraData := r.blockData[r.dataOffset:r.dataOffset+extraDataLen]
+						r.dataOffset += extraDataLen
+						recordLength += uint32(extraDataLen)
+						
+						// Try to extract readable strings from the data
+						readableData := extractReadableStrings(extraData)
+						if len(readableData) > 0 {
+							recordData = []byte(fmt.Sprintf("space=%d page=%d data=%s", spaceID, pageNo, readableData))
+						} else {
+							recordData = []byte(fmt.Sprintf("space=%d page=%d hex=%x", spaceID, pageNo, extraData))
+						}
 					} else {
-						recordData = []byte(fmt.Sprintf("space=%d page=%d hex=%x", spaceID, pageNo, extraData))
+						recordData = []byte(fmt.Sprintf("space=%d page=%d", spaceID, pageNo))
 					}
 				} else {
 					recordData = []byte(fmt.Sprintf("space=%d page=%d", spaceID, pageNo))
@@ -232,14 +255,15 @@ func (r *MySQLRedoLogReader) ReadRecord() (*types.LogRecord, error) {
 			
 		default:
 			// For other record types, try mlog_parse_string format: offset(2) + len(2) + data
-			if remainingData >= 4 {
+			if remainingData >= 4 && r.dataOffset+4 <= len(r.blockData) {
 				offset := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
 				length := binary.LittleEndian.Uint16(r.blockData[r.dataOffset+2:r.dataOffset+4])
 				r.dataOffset += 4
 				recordLength += 4
 				
 				// Try to read string data if length is reasonable
-				if length > 0 && length <= uint16(remainingData-4) && length <= 256 {
+				remainingAfterHeader := len(r.blockData) - r.dataOffset
+				if length > 0 && int(length) <= remainingAfterHeader && length <= 256 && r.dataOffset+int(length) <= len(r.blockData) {
 					stringData := r.blockData[r.dataOffset:r.dataOffset+int(length)]
 					r.dataOffset += int(length)
 					recordLength += uint32(length)
@@ -252,11 +276,11 @@ func (r *MySQLRedoLogReader) ReadRecord() (*types.LogRecord, error) {
 					}
 				} else {
 					// Maybe it's a different format, try to read what we can
-					maxRead := remainingData - 4
+					maxRead := remainingAfterHeader
 					if maxRead > 64 {
 						maxRead = 64
 					}
-					if maxRead > 0 {
+					if maxRead > 0 && r.dataOffset+maxRead <= len(r.blockData) {
 						someData := r.blockData[r.dataOffset:r.dataOffset+maxRead]
 						r.dataOffset += maxRead
 						recordLength += uint32(maxRead)
@@ -283,7 +307,7 @@ func (r *MySQLRedoLogReader) ReadRecord() (*types.LogRecord, error) {
 
 	record := &types.LogRecord{
 		Type:          types.LogType(recordType), // Store raw type for now
-		LSN:           uint64(r.position),
+		LSN:           uint64(r.position + int64(r.dataOffset)),
 		Length:        recordLength,
 		TransactionID: 0, // Not directly available in redo log records
 		Timestamp:     time.Now(), // Not stored in redo log
@@ -294,9 +318,9 @@ func (r *MySQLRedoLogReader) ReadRecord() (*types.LogRecord, error) {
 		Checksum:      r.currentBlock.Checksum,
 	}
 
-	// Move to next block
-	r.dataOffset = len(r.blockData)
-
+	// Note: r.dataOffset has already been advanced by the parsing logic above
+	// Don't skip to end of block - continue parsing from current position
+	
 	return record, nil
 }
 
@@ -324,7 +348,11 @@ func (r *MySQLRedoLogReader) readNextBlock() error {
 	dataLen := int(header.DataLen) - LogBlockHdrSize
 	if dataLen > 0 && dataLen <= len(dataBytes) {
 		r.blockData = dataBytes[:dataLen]
+	} else if dataLen > len(dataBytes) {
+		// DataLen header is larger than available data, use all available data
+		r.blockData = dataBytes
 	} else {
+		// DataLen is 0 or negative, use all available data
 		r.blockData = dataBytes
 	}
 	r.dataOffset = 0

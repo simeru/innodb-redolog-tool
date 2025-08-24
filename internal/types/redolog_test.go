@@ -13,14 +13,17 @@ func TestLogType_String(t *testing.T) {
 		logType  LogType
 		expected string
 	}{
-		{LogType(9), "INSERT"},       // MySQL MLOG_REC_INSERT
-		{LogType(13), "UPDATE"},      // MySQL MLOG_REC_UPDATE_IN_PLACE
-		{LogType(14), "DELETE"},      // MySQL MLOG_REC_DELETE
-		{LogType(1), "1BYTE"},        // MySQL MLOG_1BYTE
-		{LogType(2), "2BYTES"},       // MySQL MLOG_2BYTES
-		{LogType(4), "4BYTES"},       // MySQL MLOG_4BYTES
-		{LogType(8), "8BYTES"},       // MySQL MLOG_8BYTES
-		{LogType(99), "MLOG_99"},     // Unknown type shows MLOG_N format
+		{LogType(9), "MLOG_REC_INSERT_8027"},       // MySQL MLOG_REC_INSERT_8027
+		{LogType(13), "MLOG_REC_UPDATE_IN_PLACE_8027"}, // MySQL MLOG_REC_UPDATE_IN_PLACE_8027
+		{LogType(14), "MLOG_REC_DELETE_8027"},      // MySQL MLOG_REC_DELETE_8027
+		{LogType(1), "MLOG_1BYTE"},        // MySQL MLOG_1BYTE
+		{LogType(2), "MLOG_2BYTES"},       // MySQL MLOG_2BYTES
+		{LogType(4), "MLOG_4BYTES"},       // MySQL MLOG_4BYTES
+		{LogType(8), "MLOG_8BYTES"},       // MySQL MLOG_8BYTES
+		{LogType(67), "MLOG_REC_INSERT"},  // Current format INSERT
+		{LogType(69), "MLOG_REC_DELETE"},  // Current format DELETE
+		{LogType(0), "INVALID_MLOG_0 (should not exist)"}, // Invalid type 0
+		{LogType(99), "INVALID_MLOG_99 (exceeds MLOG_BIGGEST_TYPE=76)"}, // Invalid type > 76
 	}
 
 	for _, tt := range tests {
@@ -35,13 +38,28 @@ func TestLogType_IsTransactional(t *testing.T) {
 		logType       LogType
 		transactional bool
 	}{
-		{LogType(9), true},   // INSERT
-		{LogType(13), true},  // UPDATE  
-		{LogType(14), true},  // DELETE
-		{LogType(1), false},  // 1BYTE
-		{LogType(2), false},  // 2BYTES
-		{LogType(4), false},  // 4BYTES
-		{LogType(8), false},  // 8BYTES
+		// Old 8027 format transactional operations
+		{LogType(9), true},   // MLOG_REC_INSERT_8027
+		{LogType(10), true},  // MLOG_REC_CLUST_DELETE_MARK_8027
+		{LogType(13), true},  // MLOG_REC_UPDATE_IN_PLACE_8027  
+		{LogType(14), true},  // MLOG_REC_DELETE_8027
+		// Compact format transactional operations
+		{LogType(38), true},  // MLOG_COMP_REC_INSERT_8027
+		{LogType(39), true},  // MLOG_COMP_REC_CLUST_DELETE_MARK_8027
+		{LogType(41), true},  // MLOG_COMP_REC_UPDATE_IN_PLACE_8027
+		{LogType(42), true},  // MLOG_COMP_REC_DELETE_8027
+		// Current format transactional operations
+		{LogType(67), true},  // MLOG_REC_INSERT
+		{LogType(68), true},  // MLOG_REC_CLUST_DELETE_MARK
+		{LogType(69), true},  // MLOG_REC_DELETE
+		{LogType(70), true},  // MLOG_REC_UPDATE_IN_PLACE
+		// Non-transactional operations
+		{LogType(1), false},  // MLOG_1BYTE
+		{LogType(2), false},  // MLOG_2BYTES
+		{LogType(4), false},  // MLOG_4BYTES
+		{LogType(8), false},  // MLOG_8BYTES
+		{LogType(19), false}, // MLOG_PAGE_CREATE
+		{LogType(30), false}, // MLOG_WRITE_STRING
 	}
 
 	for _, tt := range tests {
