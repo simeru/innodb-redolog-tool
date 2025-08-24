@@ -75,7 +75,7 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	for i, record := range records {
 		recordNum := fmt.Sprintf("%d", i+1)
 		recordType := record.Type.String()
-		tableInfo := fmt.Sprintf("(%d)", record.TableID)
+		// This variable is now replaced by idInfo below
 		
 		// Add visual grouping indicators
 		var groupIndicator string
@@ -98,7 +98,17 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 			groupIndicator = "   "
 		}
 		
-		listItem := fmt.Sprintf("%s%s%-6s %s%s", colorPrefix, groupIndicator, recordNum, recordType, tableInfo)
+		// Show SpaceID if available, otherwise TableID
+		var idInfo string
+		if record.SpaceID != 0 {
+			idInfo = fmt.Sprintf("(S:%d)", record.SpaceID) // Space ID
+		} else if record.TableID != 0 {
+			idInfo = fmt.Sprintf("(T:%d)", record.TableID) // Table ID
+		} else {
+			idInfo = "(0)" // Default
+		}
+		
+		listItem := fmt.Sprintf("%s%s%-6s %s%s", colorPrefix, groupIndicator, recordNum, recordType, idInfo)
 		
 		app.recordList.AddItem(listItem, "", 0, nil)
 	}
@@ -285,9 +295,9 @@ func (app *RedoLogApp) showRecordDetails(index int) {
 [green]Length:[white]         %d bytes
 [green]Transaction ID:[white] %d
 [green]Timestamp:[white]      %s
+[green]Space ID:[white]       %d
 [green]Table ID:[white]       %d
 [green]Index ID:[white]       %d
-[green]Space ID:[white]       %d
 [green]Page Number:[white]    %d
 [green]Offset:[white]         %d
 [green]Checksum:[white]       0x%08X
@@ -300,9 +310,9 @@ func (app *RedoLogApp) showRecordDetails(index int) {
 		record.Length,
 		record.TransactionID,
 		record.Timestamp.Format("2006-01-02 15:04:05"),
+		record.SpaceID,
 		record.TableID,
 		record.IndexID,
-		record.SpaceID,
 		record.PageNo,
 		record.Offset,
 		record.Checksum,
