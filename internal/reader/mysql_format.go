@@ -304,8 +304,15 @@ func (r *MySQLRedoLogReader) parseMLOG_REC_INSERT_8027() []byte {
 	// Add hex representation of the entire data for comparison
 	totalBytes := r.dataOffset - startOffset
 	if totalBytes > 0 && startOffset+totalBytes <= len(r.blockData) {
-		hexData := fmt.Sprintf("hex=%x", r.blockData[startOffset:r.dataOffset])
+		hexBytes := r.blockData[startOffset:r.dataOffset]
+		hexData := fmt.Sprintf("hex=%x", hexBytes)
+		
+		// Add parsed field interpretation
+		fieldParseResult := ParseRecordDataAsFields(hexBytes)
+		
+		// Combine hex and parsed results
 		result = append(result, hexData)
+		result = append(result, fmt.Sprintf("parsed=(%s)", fieldParseResult))
 	}
 	
 	return []byte(strings.Join(result, " | "))
@@ -1069,16 +1076,21 @@ func (r *MySQLRedoLogReader) Close() error {
 }
 
 
-// ParseRecordDataAsFields attempts to parse binary data as database fields
+// ParseRecordDataAsFields attempts to parse binary data as InnoDB COMPACT record
 func ParseRecordDataAsFields(data []byte) string {
 	if len(data) == 0 {
 		return "empty"
 	}
 	
+	// Try to parse as InnoDB COMPACT record format first
+	if compactResult := tryParseInnoDBCompactRecord(data); compactResult != "" {
+		return compactResult
+	}
+	
+	// Fallback to generic field parsing
 	results := make([]string, 0)
 	offset := 0
 	
-	// First pass: Try to identify meaningful VARCHAR fields
 	for offset < len(data) {
 		remaining := data[offset:]
 		if len(remaining) == 0 {
@@ -1099,20 +1111,10 @@ func ParseRecordDataAsFields(data []byte) string {
 			continue
 		}
 		
-		// Try standard integers (prefer 4-byte for meaningful values)
-		if len(remaining) >= 4 {
-			val32 := machReadIntType(remaining, 4, true)
-			if val32 > 0 && val32 < 1000000 { // Reasonable range
-				results = append(results, fmt.Sprintf("u32=%d", val32))
-				offset += 4
-				continue
-			}
-		}
-		
 		// Try 1-byte values
 		if len(remaining) >= 1 {
 			val8 := remaining[0]
-			if val8 > 0 && val8 < 128 { // ASCII or small numbers
+			if val8 > 0 && val8 < 128 {
 				results = append(results, fmt.Sprintf("u8=%d", val8))
 			} else {
 				results = append(results, fmt.Sprintf("byte=0x%02x", val8))
@@ -1124,17 +1126,147 @@ func ParseRecordDataAsFields(data []byte) string {
 		break
 	}
 	
-	// If we have remaining data, show it as hex
-	if offset < len(data) {
-		remaining := data[offset:]
-		if len(remaining) <= 8 {
-			results = append(results, fmt.Sprintf("hex=%x", remaining))
-		} else {
-			results = append(results, fmt.Sprintf("hex=%x...", remaining[:8]))
+	return fmt.Sprintf("fields=[%s]", strings.Join(results, " "))
+}
+
+// tryParseInnoDBCompactRecord attempts to parse as InnoDB COMPACT record format
+func tryParseInnoDBCompactRecord(data []byte) string {
+	if len(data) < 5 {
+		return "" // Too small to be a valid record
+	}
+	
+	results := make([]string, 0)
+	offset := 0
+	
+	// Try to identify variable-length header section
+	// Look for patterns that suggest field lengths and NULL bits
+	
+	// First few bytes might be variable-length field info
+	if offset < len(data) && data[offset] > 0 && data[offset] < 50 {
+		// Possible field length bytes
+		fieldLengths := make([]int, 0)
+		for offset < len(data) && data[offset] > 0 && data[offset] < 50 && len(fieldLengths) < 10 {
+			fieldLengths = append(fieldLengths, int(data[offset]))
+			offset++
+		}
+		
+		if len(fieldLengths) > 0 {
+			results = append(results, fmt.Sprintf("field_lengths=%v", fieldLengths))
 		}
 	}
 	
-	return fmt.Sprintf("fields=[%s]", strings.Join(results, " "))
+	// Skip potential NULL bits and record header (approximately 5 bytes)
+	headerSkip := 5
+	if offset + headerSkip < len(data) {
+		offset += headerSkip
+		results = append(results, fmt.Sprintf("header_skip=%d", headerSkip))
+	}
+	
+	// Now try to parse the actual field data
+	fieldNum := 1
+	for offset < len(data) {
+		remaining := data[offset:]
+		if len(remaining) == 0 {
+			break
+		}
+		
+		parsed := false
+		
+		// Try different field types common in Sakila
+		// 1. Integer fields (common in IDs)
+		if len(remaining) >= 4 {
+			val32 := machReadIntType(remaining, 4, true)
+			if val32 > 0 && val32 < 100000 { // Reasonable ID range
+				results = append(results, fmt.Sprintf("field%d_int=%d", fieldNum, val32))
+				offset += 4
+				parsed = true
+				fieldNum++
+			}
+		}
+		
+		// 2. Single byte integers
+		if !parsed && len(remaining) >= 1 {
+			val8 := remaining[0]
+			if val8 > 0 && val8 < 200 { // Could be enum, small int, etc
+				results = append(results, fmt.Sprintf("field%d_tinyint=%d", fieldNum, val8))
+				offset += 1
+				parsed = true
+				fieldNum++
+			}
+		}
+		
+		// 3. String fields with length prefix
+		if !parsed {
+			if strResult, used := tryParseStringField(remaining); used > 0 {
+				results = append(results, fmt.Sprintf("field%d_str=%s", fieldNum, strResult))
+				offset += used
+				parsed = true
+				fieldNum++
+			}
+		}
+		
+		// 4. Timestamp/Date fields (common in Sakila)
+		if !parsed && len(remaining) >= 8 {
+			// MySQL TIMESTAMP format
+			timestamp := machReadIntType(remaining, 8, true)
+			if timestamp > 1000000000 && timestamp < 2000000000 { // Reasonable timestamp range
+				results = append(results, fmt.Sprintf("field%d_timestamp=%d", fieldNum, timestamp))
+				offset += 8
+				parsed = true
+				fieldNum++
+			}
+		}
+		
+		if !parsed {
+			// Show remaining as hex and break
+			maxShow := len(remaining)
+			if maxShow > 8 {
+				maxShow = 8
+			}
+			results = append(results, fmt.Sprintf("remaining_hex=%x", remaining[:maxShow]))
+			break
+		}
+		
+		// Safety check to avoid infinite loop
+		if fieldNum > 20 {
+			break
+		}
+	}
+	
+	if len(results) > 1 { // We found some structured data
+		return fmt.Sprintf("innodb_record=[%s]", strings.Join(results, " "))
+	}
+	
+	return "" // Not a recognizable InnoDB record
+}
+
+// tryParseStringField attempts to parse a string field with various length encodings
+func tryParseStringField(data []byte) (result string, bytesUsed int) {
+	if len(data) == 0 {
+		return "", 0
+	}
+	
+	// Try single-byte length prefix
+	if data[0] > 0 && data[0] <= 100 && len(data) >= int(data[0])+1 {
+		length := int(data[0])
+		stringData := data[1 : length+1]
+		if isMeaningfulString(stringData) {
+			return fmt.Sprintf("'%s'", sanitizeString(stringData)), length + 1
+		}
+	}
+	
+	// Try two-byte length (little-endian)
+	if len(data) >= 3 {
+		length := int(data[0]) | (int(data[1]) << 8)
+		if length > 0 && length <= 255 && len(data) >= length+2 {
+			stringData := data[2 : length+2]
+			if isMeaningfulString(stringData) {
+				return fmt.Sprintf("'%s'", sanitizeString(stringData)), length + 2
+			}
+		}
+	}
+	
+	return "", 0
 }
 
 // tryParseVarcharMeaningful only parses VARCHAR if it contains meaningful content
