@@ -332,9 +332,34 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 
 	// Set up mouse handler for click and scroll support
 	app.recordList.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		x, y := event.Position()
+		
+		// Check if mouse is over the details text view (right pane)
+		detailsX, detailsY, detailsWidth, detailsHeight := app.detailsText.GetRect()
+		if x >= detailsX && x < detailsX+detailsWidth && y >= detailsY && y < detailsY+detailsHeight {
+			// Mouse is over right pane - handle scrolling there
+			if action == tview.MouseScrollUp {
+				// Send up arrow key to details pane for scrolling
+				upEvent := tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone)
+				for i := 0; i < 3; i++ { // Scroll by 3 lines
+					app.detailsText.InputHandler()(upEvent, nil)
+				}
+				return tview.MouseConsumed, nil
+			} else if action == tview.MouseScrollDown {
+				// Send down arrow key to details pane for scrolling
+				downEvent := tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone)
+				for i := 0; i < 3; i++ { // Scroll by 3 lines
+					app.detailsText.InputHandler()(downEvent, nil)
+				}
+				return tview.MouseConsumed, nil
+			}
+			// For other actions (like clicks), pass through to details pane
+			return action, event
+		}
+		
+		// Mouse is over left pane - handle record navigation
 		if action == tview.MouseLeftClick {
 			// Handle mouse clicks manually to ensure they work
-			_, y := event.Position()
 			// Convert screen coordinates to list item index
 			_, _, _, height := app.recordList.GetRect()
 			if y >= 1 && y < height-1 && len(app.filteredRecords) > 0 { // Account for borders
