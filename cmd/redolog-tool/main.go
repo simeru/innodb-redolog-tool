@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -220,30 +221,48 @@ func main() {
 		return
 	}
 
-	// Test mode: parse specific hex data and exit
+	// Test mode: parse records and show cross-block reads with strings
 	if *testMode {
-		fmt.Printf("Test mode: Parsing hex data examples\n\n")
+		fmt.Printf("Test mode: Searching for records with cross-block reads and VARCHAR strings\n\n")
 		
-		// Test the user's example: 000000000503c20000
-		testHex := "000000000503c20000"
-		fmt.Printf("Testing hex: %s\n", testHex)
-		hexBytes, err := hex.DecodeString(testHex)
-		if err != nil {
-			fmt.Printf("Error decoding hex: %v\n", err)
-		} else {
-			fieldResult := testParseFields(hexBytes)
-			fmt.Printf("Field parsing result: %s\n\n", fieldResult)
+		foundVarcharRecords := 0
+		foundCrossBlockRecords := 0
+		
+		for i, record := range records {
+			// Look for MLOG_REC_INSERT_8027 records with actual data
+			if record.Type == 9 { // MLOG_REC_INSERT_8027
+				dataStr := string(record.Data)
+				
+				// Check if this record has cross-block read success
+				if strings.Contains(dataStr, "cross_block_read=success") {
+					foundCrossBlockRecords++
+					fmt.Printf("Record %d: MLOG_REC_INSERT_8027 with cross-block read success\n", i+1)
+					fmt.Printf("  TableID: %d\n", record.TableID)
+					
+					// Check if it contains string data
+					if strings.Contains(dataStr, "found_strings=") {
+						foundVarcharRecords++
+						fmt.Printf("  *** Contains VARCHAR strings! ***\n")
+					}
+					
+					if strings.Contains(dataStr, "data_hex=") {
+						fmt.Printf("  Data: %s\n", record.Data)
+					}
+					fmt.Printf("\n")
+				}
+			}
 		}
 		
-		// Test another example from the user's data: 00000115027108000000000000004a00c6fbfe7e0101000900018008800680
-		testHex2 := "00000115027108000000000000004a00c6fbfe7e0101000900018008800680"
-		fmt.Printf("Testing hex: %s\n", testHex2)
-		hexBytes2, err := hex.DecodeString(testHex2)
-		if err != nil {
-			fmt.Printf("Error decoding hex: %v\n", err)
+		fmt.Printf("Summary:\n")
+		fmt.Printf("- Records with cross-block read success: %d\n", foundCrossBlockRecords)
+		fmt.Printf("- Records with VARCHAR strings: %d\n", foundVarcharRecords)
+		
+		if foundVarcharRecords > 0 {
+			fmt.Printf("\n✅ Success! Found VARCHAR strings in sakila_redolog.log records!\n")
+		} else if foundCrossBlockRecords > 0 {
+			fmt.Printf("\n⚠️  Found cross-block reads but no VARCHAR strings yet. Need to improve string extraction.\n")
 		} else {
-			fieldResult2 := testParseFields(hexBytes2)
-			fmt.Printf("Field parsing result: %s\n\n", fieldResult2)
+			fmt.Printf("\n❌ No cross-block reads found. The boundary issue may still exist.\n")
 		}
 		
 		return

@@ -434,17 +434,36 @@ func (r *MySQLRedoLogReader) parseRecordData8027() string {
 	
 	// Parse actual record data
 	actualDataLen := int(endSegLen >> 1) // Shift right by 1 to get actual length
-	if actualDataLen > 0 && r.dataOffset+actualDataLen <= len(r.blockData) {
-		recordBytes := r.blockData[r.dataOffset:r.dataOffset+actualDataLen]
-		r.dataOffset += actualDataLen
-		
-		// Try to parse as human-readable fields
-		// Note: We don't have full index metadata, so this is best-effort parsing
-		fieldParseResult := parseRecordDataAsFields(recordBytes, 3) // Assume up to 3 fields for common cases
-		result = append(result, fieldParseResult)
-		
-		// Keep hex for reference
-		result = append(result, fmt.Sprintf("data_hex=%x", recordBytes))
+	result = append(result, fmt.Sprintf("debug_actualDataLen=%d", actualDataLen))
+	result = append(result, fmt.Sprintf("debug_dataOffset=%d", r.dataOffset))
+	result = append(result, fmt.Sprintf("debug_blockDataLen=%d", len(r.blockData)))
+	
+	if actualDataLen > 0 {
+		// Use cross-block reading to handle data that spans multiple blocks
+		recordBytes, err := r.readDataAcrossBlocks(actualDataLen)
+		if err != nil {
+			result = append(result, fmt.Sprintf("cross_block_read_error=%v", err))
+		} else if len(recordBytes) == actualDataLen {
+			// Successfully read the data
+			result = append(result, "cross_block_read=success")
+			
+			// Try to parse as human-readable fields
+			fieldParseResult := parseRecordDataAsFields(recordBytes, 3) // Assume up to 3 fields for common cases
+			result = append(result, fieldParseResult)
+			
+			// Keep hex for reference
+			result = append(result, fmt.Sprintf("data_hex=%x", recordBytes))
+			
+			// Check if recordBytes contains printable strings
+			if len(recordBytes) > 0 {
+				stringData := extractReadableStrings(recordBytes)
+				if len(stringData) > 0 {
+					result = append(result, fmt.Sprintf("found_strings='%s'", stringData))
+				}
+			}
+		} else {
+			result = append(result, fmt.Sprintf("cross_block_read_incomplete: expected=%d, got=%d", actualDataLen, len(recordBytes)))
+		}
 	}
 	
 	return fmt.Sprintf("record_data=(%s)", strings.Join(result, ","))
@@ -905,6 +924,42 @@ func (r *MySQLRedoLogReader) parseValidRecord(recordType uint8) (*types.LogRecor
 	// Don't skip to end of block - continue parsing from current position
 	
 	return record, nil
+}
+
+// readDataAcrossBlocks reads data that may span across multiple blocks
+func (r *MySQLRedoLogReader) readDataAcrossBlocks(length int) ([]byte, error) {
+	if length <= 0 {
+		return nil, nil
+	}
+	
+	result := make([]byte, 0, length)
+	remaining := length
+	
+	for remaining > 0 {
+		// Check if we need more blocks
+		availableInCurrentBlock := len(r.blockData) - r.dataOffset
+		if availableInCurrentBlock <= 0 {
+			// Need to read next block
+			err := r.readNextBlock()
+			if err != nil {
+				return nil, fmt.Errorf("failed to read next block for cross-block data: %w", err)
+			}
+			availableInCurrentBlock = len(r.blockData)
+		}
+		
+		// Read as much as possible from current block
+		toRead := remaining
+		if toRead > availableInCurrentBlock {
+			toRead = availableInCurrentBlock
+		}
+		
+		// Copy data from current block
+		result = append(result, r.blockData[r.dataOffset:r.dataOffset+toRead]...)
+		r.dataOffset += toRead
+		remaining -= toRead
+	}
+	
+	return result, nil
 }
 
 // readNextBlock reads the next 512-byte log block
