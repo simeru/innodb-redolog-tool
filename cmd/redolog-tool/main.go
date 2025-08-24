@@ -115,17 +115,17 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	app.recordList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyUp:
-			// Up arrow should go to next record (larger index) - fixing user expectation
-			current := app.recordList.GetCurrentItem()
-			if current < len(app.records)-1 {
-				app.recordList.SetCurrentItem(current + 1)
-			}
-			return nil
-		case tcell.KeyDown:
-			// Down arrow should go to previous record (smaller index) - fixing user expectation
+			// Up arrow should go to previous record (smaller index) - natural list navigation
 			current := app.recordList.GetCurrentItem()
 			if current > 0 {
 				app.recordList.SetCurrentItem(current - 1)
+			}
+			return nil
+		case tcell.KeyDown:
+			// Down arrow should go to next record (larger index) - natural list navigation
+			current := app.recordList.GetCurrentItem()
+			if current < len(app.records)-1 {
+				app.recordList.SetCurrentItem(current + 1)
 			}
 			return nil
 		case tcell.KeyTab:
@@ -150,17 +150,17 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	app.detailsText.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyUp:
-			// Up arrow should go to next record (larger index) - fixing user expectation
-			current := app.recordList.GetCurrentItem()
-			if current < len(app.records)-1 {
-				app.recordList.SetCurrentItem(current + 1)
-			}
-			return nil
-		case tcell.KeyDown:
-			// Down arrow should go to previous record (smaller index) - fixing user expectation
+			// Up arrow should go to previous record (smaller index) - natural list navigation
 			current := app.recordList.GetCurrentItem()
 			if current > 0 {
 				app.recordList.SetCurrentItem(current - 1)
+			}
+			return nil
+		case tcell.KeyDown:
+			// Down arrow should go to next record (larger index) - natural list navigation
+			current := app.recordList.GetCurrentItem()
+			if current < len(app.records)-1 {
+				app.recordList.SetCurrentItem(current + 1)
 			}
 			return nil
 		case tcell.KeyTab:
