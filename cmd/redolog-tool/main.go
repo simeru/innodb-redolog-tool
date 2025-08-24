@@ -70,12 +70,35 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	app.detailsText.SetDynamicColors(true)
 	app.detailsText.SetScrollable(true)
 
-	// Populate record list
+	// Populate record list with multi-record group visualization
+	groupColors := []string{"[white]", "[cyan]", "[yellow]", "[green]", "[magenta]", "[blue]"}
 	for i, record := range records {
 		recordNum := fmt.Sprintf("%d", i+1)
 		recordType := record.Type.String()
 		tableInfo := fmt.Sprintf("(%d)", record.TableID)
-		listItem := fmt.Sprintf("%-6s %s%s", recordNum, recordType, tableInfo)
+		
+		// Add visual grouping indicators
+		var groupIndicator string
+		var colorPrefix string
+		
+		if record.MultiRecordGroup > 0 {
+			// Use different colors for different groups
+			colorIndex := (record.MultiRecordGroup - 1) % len(groupColors)
+			colorPrefix = groupColors[colorIndex]
+			
+			if record.IsGroupStart {
+				groupIndicator = "┌─ "
+			} else if record.IsGroupEnd {
+				groupIndicator = "└─ "
+			} else {
+				groupIndicator = "├─ "
+			}
+		} else {
+			colorPrefix = "[white]"
+			groupIndicator = "   "
+		}
+		
+		listItem := fmt.Sprintf("%s%s%-6s %s%s", colorPrefix, groupIndicator, recordNum, recordType, tableInfo)
 		
 		app.recordList.AddItem(listItem, "", 0, nil)
 	}
@@ -241,6 +264,20 @@ func (app *RedoLogApp) showRecordDetails(index int) {
 
 	record := app.records[index]
 	
+	// Add group information to details
+	var groupInfo string
+	if record.MultiRecordGroup > 0 {
+		groupStatus := ""
+		if record.IsGroupStart {
+			groupStatus = " (Group Start)"
+		} else if record.IsGroupEnd {
+			groupStatus = " (Group End)"
+		} else {
+			groupStatus = " (Group Member)"
+		}
+		groupInfo = fmt.Sprintf("[green]Multi-Record Group:[white] %d%s\n", record.MultiRecordGroup, groupStatus)
+	}
+	
 	details := fmt.Sprintf(`[yellow]Record %d Details[white]
 
 [green]Type:[white]           %s
@@ -254,7 +291,7 @@ func (app *RedoLogApp) showRecordDetails(index int) {
 [green]Page Number:[white]    %d
 [green]Offset:[white]         %d
 [green]Checksum:[white]       0x%08X
-
+%s
 [green]Data:[white]
 `,
 		index+1,
@@ -268,7 +305,8 @@ func (app *RedoLogApp) showRecordDetails(index int) {
 		record.SpaceID,
 		record.PageNo,
 		record.Offset,
-		record.Checksum)
+		record.Checksum,
+		groupInfo)
 
 	if len(record.Data) > 0 {
 		details += fmt.Sprintf("%s (%d bytes)", string(record.Data), len(record.Data))
@@ -341,7 +379,56 @@ func loadRedoLogData(filename string) ([]*types.LogRecord, *types.RedoLogHeader,
 		fmt.Printf("Loaded %d records\n", len(records))
 	}
 
+	// Post-process records to properly detect multi-record groups
+	detectMultiRecordGroups(records)
+
 	return records, header, nil
+}
+
+// detectMultiRecordGroups analyzes records to identify multi-record groups
+func detectMultiRecordGroups(records []*types.LogRecord) {
+	groupID := 0
+	groupStart := -1
+	
+	for i, record := range records {
+		// Look for MLOG_MULTI_REC_END (31) to identify group boundaries
+		if uint8(record.Type) == 31 { // MLOG_MULTI_REC_END
+			if groupStart != -1 {
+				// We found a group from groupStart to current position
+				groupID++
+				
+				// Mark all records in this group
+				for j := groupStart; j <= i; j++ {
+					records[j].MultiRecordGroup = groupID
+					if j == groupStart {
+						records[j].IsGroupStart = true
+					} else if j == i {
+						records[j].IsGroupEnd = true
+					}
+				}
+				
+				groupStart = -1 // Reset for next group
+			} else {
+				// Isolated MULTI_REC_END - shouldn't happen normally
+				record.MultiRecordGroup = 0
+			}
+		} else {
+			// Regular record
+			if groupStart == -1 {
+				// This could be the start of a multi-record group or a single record
+				// We'll determine this when we see MULTI_REC_END or the next group start
+				groupStart = i
+			}
+		}
+	}
+	
+	// Handle any remaining records that didn't have MULTI_REC_END
+	if groupStart != -1 {
+		// These are likely single records
+		for j := groupStart; j < len(records); j++ {
+			records[j].MultiRecordGroup = 0 // Single records
+		}
+	}
 }
 
 func createReader(filename string, verbose bool) (reader.RedoLogReader, error) {

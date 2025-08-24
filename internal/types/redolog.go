@@ -40,6 +40,11 @@ type LogRecord struct {
 	SpaceID uint32
 	PageNo  uint32
 	Offset  uint16
+	
+	// Multi-record grouping
+	MultiRecordGroup int  // Group ID for multi-record transactions (0 = single record)
+	IsGroupStart     bool // True if this record starts a multi-record group
+	IsGroupEnd       bool // True if this record ends a multi-record group
 }
 
 // RedoLogHeader represents the redo log file header

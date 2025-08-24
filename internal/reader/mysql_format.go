@@ -325,16 +325,19 @@ func (r *MySQLRedoLogReader) parseValidRecord(recordType uint8) (*types.LogRecor
 	recordTimestamp := r.baseTimestamp.Add(time.Duration(relativeTimeMs) * time.Millisecond)
 
 	record := &types.LogRecord{
-		Type:          types.LogType(recordType), // Store raw type for now
-		LSN:           currentLSN,
-		Length:        recordLength,
-		TransactionID: 0, // Not directly available in redo log records
-		Timestamp:     recordTimestamp, // Calculated based on LSN progression
-		TableID:       0, // Would need complex parsing to extract
-		SpaceID:       spaceID,
-		PageNo:        pageNo,
-		Data:          recordData,
-		Checksum:      r.currentBlock.Checksum,
+		Type:             types.LogType(recordType), // Store raw type for now
+		LSN:              currentLSN,
+		Length:           recordLength,
+		TransactionID:    0, // Not directly available in redo log records
+		Timestamp:        recordTimestamp, // Calculated based on LSN progression
+		TableID:          0, // Would need complex parsing to extract
+		SpaceID:          spaceID,
+		PageNo:           pageNo,
+		Data:             recordData,
+		Checksum:         r.currentBlock.Checksum,
+		MultiRecordGroup: 0,    // Will be set by post-processing
+		IsGroupStart:     false, // Will be set by post-processing
+		IsGroupEnd:       false, // Will be set by post-processing
 	}
 
 	// Note: r.dataOffset has already been advanced by the parsing logic above
