@@ -29,6 +29,7 @@ type RedoLogApp struct {
 	recordIndices []int // Maps filtered index to original index
 	header        *types.RedoLogHeader
 	showTableID0  bool // Toggle for showing Table ID 0 records
+	operationFilter string // "all", "insert", "update", "delete"
 }
 
 func main() {
@@ -261,6 +262,7 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 		records: records,
 		header:  header,
 		showTableID0: false, // Default: hide Table ID 0 records
+		operationFilter: "all", // Default: show all operation types
 	}
 
 	// Create main application
@@ -376,6 +378,18 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 			app.toggleTableID0Filter()
 			return nil
 		}
+		if event.Rune() == 'i' || event.Rune() == 'I' {
+			app.toggleOperationFilter("insert")
+			return nil
+		}
+		if event.Rune() == 'u' || event.Rune() == 'U' {
+			app.toggleOperationFilter("update")
+			return nil
+		}
+		if event.Rune() == 'd' || event.Rune() == 'D' {
+			app.toggleOperationFilter("delete")
+			return nil
+		}
 		return event
 	})
 
@@ -409,6 +423,18 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 		}
 		if event.Rune() == 's' || event.Rune() == 'S' {
 			app.toggleTableID0Filter()
+			return nil
+		}
+		if event.Rune() == 'i' || event.Rune() == 'I' {
+			app.toggleOperationFilter("insert")
+			return nil
+		}
+		if event.Rune() == 'u' || event.Rune() == 'U' {
+			app.toggleOperationFilter("update")
+			return nil
+		}
+		if event.Rune() == 'd' || event.Rune() == 'D' {
+			app.toggleOperationFilter("delete")
 			return nil
 		}
 		return event
@@ -680,6 +706,30 @@ func testParseFields(data []byte) string {
 	return reader.ParseRecordDataAsFields(data)
 }
 
+// getOperationType determines if a record is INSERT, UPDATE, DELETE, or OTHER
+func getOperationType(recordType uint8) string {
+	switch recordType {
+	// INSERT operations
+	case 9, 38: // MLOG_REC_INSERT_8027, MLOG_COMP_REC_INSERT_8027
+		return "insert"
+	
+	// UPDATE operations  
+	case 13, 41: // MLOG_REC_UPDATE_IN_PLACE_8027, MLOG_COMP_REC_UPDATE_IN_PLACE_8027
+		return "update"
+	
+	// DELETE operations
+	case 10, 11, 14, 15, 16, 39, 40, 42, 43, 44:
+		// MLOG_REC_CLUST_DELETE_MARK_8027, MLOG_REC_SEC_DELETE_MARK, MLOG_REC_DELETE_8027,
+		// MLOG_LIST_END_DELETE_8027, MLOG_LIST_START_DELETE_8027, 
+		// MLOG_COMP_REC_CLUST_DELETE_MARK_8027, MLOG_COMP_REC_SEC_DELETE_MARK,
+		// MLOG_COMP_REC_DELETE_8027, MLOG_COMP_LIST_END_DELETE_8027, MLOG_COMP_LIST_START_DELETE_8027
+		return "delete"
+	
+	default:
+		return "other"
+	}
+}
+
 // updateFilteredRecords applies the current filter settings
 func (app *RedoLogApp) updateFilteredRecords() {
 	app.filteredRecords = make([]*types.LogRecord, 0)
@@ -689,6 +739,15 @@ func (app *RedoLogApp) updateFilteredRecords() {
 		// Apply Table ID 0 filter
 		if !app.showTableID0 && record.TableID == 0 && record.SpaceID == 0 {
 			continue // Skip Table ID 0 records when filter is enabled
+		}
+		
+		// Apply operation type filter
+		if app.operationFilter != "all" && app.operationFilter != "" {
+			recordType := uint8(record.Type)
+			opType := getOperationType(recordType)
+			if opType != app.operationFilter {
+				continue // Skip records that don't match the operation filter
+			}
 		}
 		
 		app.filteredRecords = append(app.filteredRecords, record)
@@ -754,8 +813,21 @@ func (app *RedoLogApp) updateFooter() {
 		filterColor = "[red]"
 	}
 
-	footerText := fmt.Sprintf(`[yellow]Press [white][bold]'s'[reset] [yellow]to toggle Table ID 0 filter[white] | Filter: %s%s[white] | Records: [cyan]%d[white]/[blue]%d`,
-		filterColor, filterStatus, len(app.filteredRecords), len(app.records))
+	// Operation filter display
+	var opFilterText string
+	switch app.operationFilter {
+	case "insert":
+		opFilterText = "[green]INSERT"
+	case "update":
+		opFilterText = "[blue]UPDATE"
+	case "delete":
+		opFilterText = "[red]DELETE"
+	default:
+		opFilterText = "[white]ALL"
+	}
+
+	footerText := fmt.Sprintf(`[yellow]Keys: [bold]'s'[reset][yellow]=Table ID 0, [bold]'i'[reset][yellow]=INSERT, [bold]'u'[reset][yellow]=UPDATE, [bold]'d'[reset][yellow]=DELETE [white]| Filters: Table ID 0=%s%s[white] Op=%s[white] | Records: [cyan]%d[white]/[blue]%d`,
+		filterColor, filterStatus, opFilterText, len(app.filteredRecords), len(app.records))
 
 	app.footer.SetText(footerText)
 }
@@ -763,6 +835,35 @@ func (app *RedoLogApp) updateFooter() {
 // toggleTableID0Filter toggles the Table ID 0 filter and refreshes the display
 func (app *RedoLogApp) toggleTableID0Filter() {
 	app.showTableID0 = !app.showTableID0
+	
+	// Update filtered records
+	app.updateFilteredRecords()
+	
+	// Rebuild the record list
+	app.rebuildRecordList()
+	
+	// Update header info to show new filter status
+	app.showHeaderInfo()
+	
+	// Update footer
+	app.updateFooter()
+	
+	// Reset selection to first record if available
+	if len(app.filteredRecords) > 0 {
+		app.recordList.SetCurrentItem(0)
+		app.showRecordDetails(0)
+	}
+}
+
+// toggleOperationFilter toggles between specific operation filter and "all"
+func (app *RedoLogApp) toggleOperationFilter(operation string) {
+	if app.operationFilter == operation {
+		// If already filtering by this operation, switch to show all
+		app.operationFilter = "all"
+	} else {
+		// Switch to filter by this operation
+		app.operationFilter = operation
+	}
 	
 	// Update filtered records
 	app.updateFilteredRecords()
