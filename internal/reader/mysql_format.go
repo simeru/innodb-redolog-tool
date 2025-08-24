@@ -200,6 +200,73 @@ func (r *MySQLRedoLogReader) ReadRecord() (*types.LogRecord, error) {
 	}
 }
 
+// parseCompressedUint64 parses MySQL's compressed integer format (mach_parse_u64_much_compressed)
+// Based on MySQL ut0rnd.h and mach0data.cc implementation
+func parseCompressedUint64(data []byte) (value uint64, bytesRead int) {
+	if len(data) == 0 {
+		return 0, 0
+	}
+	
+	firstByte := data[0]
+	
+	// MySQL compressed integer format analysis:
+	// If first byte < 0x80 (128), value is stored in 1 byte
+	if firstByte < 0x80 {
+		return uint64(firstByte), 1
+	}
+	
+	// If first byte < 0xC0 (192), value uses 2 bytes
+	if firstByte < 0xC0 {
+		if len(data) < 2 {
+			return 0, 0
+		}
+		// Remove the 2-byte marker bits (0x80) and combine
+		value = uint64(firstByte&0x3F)<<8 | uint64(data[1])
+		return value, 2
+	}
+	
+	// If first byte < 0xE0 (224), value uses 3 bytes  
+	if firstByte < 0xE0 {
+		if len(data) < 3 {
+			return 0, 0
+		}
+		value = uint64(firstByte&0x1F)<<16 | uint64(data[1])<<8 | uint64(data[2])
+		return value, 3
+	}
+	
+	// If first byte < 0xF0 (240), value uses 4 bytes
+	if firstByte < 0xF0 {
+		if len(data) < 4 {
+			return 0, 0
+		}
+		value = uint64(firstByte&0x0F)<<24 | uint64(data[1])<<16 | uint64(data[2])<<8 | uint64(data[3])
+		return value, 4
+	}
+	
+	// If first byte < 0xF8 (248), value uses 5 bytes
+	if firstByte < 0xF8 {
+		if len(data) < 5 {
+			return 0, 0
+		}
+		value = uint64(firstByte&0x07)<<32 | uint64(data[1])<<24 | uint64(data[2])<<16 | uint64(data[3])<<8 | uint64(data[4])
+		return value, 5
+	}
+	
+	// For larger values, MySQL uses more complex encoding
+	// For now, handle up to 8-byte values
+	if firstByte == 0xFF {
+		if len(data) < 9 {
+			return 0, 0
+		}
+		// 8-byte value follows
+		value = binary.BigEndian.Uint64(data[1:9])
+		return value, 9
+	}
+	
+	// Fallback for other cases
+	return uint64(firstByte), 1
+}
+
 // parseValidRecord parses a record with a validated record type
 func (r *MySQLRedoLogReader) parseValidRecord(recordType uint8) (*types.LogRecord, error) {
 	// Parse record structure based on actual MySQL format discovered from source
@@ -207,6 +274,12 @@ func (r *MySQLRedoLogReader) parseValidRecord(recordType uint8) (*types.LogRecor
 	var spaceID uint32 = 0
 	var pageNo uint32 = 0
 	var recordData []byte
+	
+	// Calculate realistic timestamp based on LSN progression
+	currentLSN := uint64(r.position + int64(r.dataOffset))
+	lsnDiff := currentLSN - r.baseLSN
+	relativeTimeMs := lsnDiff / 1000
+	recordTimestamp := r.baseTimestamp.Add(time.Duration(relativeTimeMs) * time.Millisecond)
 	
 	// Parse based on actual MySQL mlog record structure
 	remainingData := len(r.blockData) - r.dataOffset
@@ -225,6 +298,58 @@ func (r *MySQLRedoLogReader) parseValidRecord(recordType uint8) (*types.LogRecor
 				recordLength += 6
 				
 				recordData = []byte(fmt.Sprintf("offset=%d value=0x%x", offset, valueBytes))
+			}
+			
+		case 62: // MLOG_TABLE_DYNAMIC_META - contains actual Table ID
+			// Format: type + compressed_table_id + compressed_version + metadata
+			if remainingData >= 2 && r.dataOffset+2 <= len(r.blockData) {
+				// Parse compressed table ID
+				tableID, bytesRead := parseCompressedUint64(r.blockData[r.dataOffset:])
+				if bytesRead > 0 {
+					r.dataOffset += bytesRead
+					recordLength += uint32(bytesRead)
+					
+					// Parse compressed version
+					version, versionBytesRead := parseCompressedUint64(r.blockData[r.dataOffset:])
+					if versionBytesRead > 0 {
+						r.dataOffset += versionBytesRead
+						recordLength += uint32(versionBytesRead)
+						
+						// Try to read remaining metadata
+						remaining := len(r.blockData) - r.dataOffset
+						if remaining > 0 {
+							maxMetadata := remaining
+							if maxMetadata > 64 {
+								maxMetadata = 64
+							}
+							metadata := r.blockData[r.dataOffset:r.dataOffset+maxMetadata]
+							r.dataOffset += maxMetadata
+							recordLength += uint32(maxMetadata)
+							
+							recordData = []byte(fmt.Sprintf("table_id=%d version=%d metadata_len=%d", tableID, version, len(metadata)))
+						} else {
+							recordData = []byte(fmt.Sprintf("table_id=%d version=%d", tableID, version))
+						}
+						
+						// Set the actual table ID for this record
+						return &types.LogRecord{
+							Type:          types.LogType(recordType),
+							Length:        recordLength,
+							LSN:          uint64(r.position + int64(r.dataOffset)),
+							Timestamp:    recordTimestamp,
+							TransactionID: uint64(r.position),
+							TableID:      uint32(tableID), // Use extracted table ID
+							IndexID:      0,
+							Data:         recordData,
+							Checksum:     0,
+							SpaceID:      spaceID,
+							PageNo:       pageNo,
+							Offset:       0,
+						}, nil
+					}
+				}
+				// Fallback if parsing fails
+				recordData = []byte("table_dynamic_meta_parse_failed")
 			}
 			
 		case 9, 13, 14: // INSERT, UPDATE, DELETE records
@@ -317,16 +442,9 @@ func (r *MySQLRedoLogReader) parseValidRecord(recordType uint8) (*types.LogRecor
 		recordData = []byte{recordType}
 	}
 
-	// Calculate realistic timestamp based on LSN progression
-	currentLSN := uint64(r.position + int64(r.dataOffset))
-	lsnDiff := currentLSN - r.baseLSN
-	// Assume LSN progression represents time progression: 1000 LSN units ≈ 1 millisecond
-	relativeTimeMs := lsnDiff / 1000
-	recordTimestamp := r.baseTimestamp.Add(time.Duration(relativeTimeMs) * time.Millisecond)
-
 	record := &types.LogRecord{
 		Type:             types.LogType(recordType), // Store raw type for now
-		LSN:              currentLSN,
+		LSN:              uint64(r.position + int64(r.dataOffset)),
 		Length:           recordLength,
 		TransactionID:    0, // Not directly available in redo log records
 		Timestamp:        recordTimestamp, // Calculated based on LSN progression

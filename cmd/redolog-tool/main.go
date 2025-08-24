@@ -40,6 +40,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Check if verbose mode is enabled for debug output
+	if *verbose {
+		// Search for MLOG_TABLE_DYNAMIC_META records (type 62) to show Table IDs
+		fmt.Printf("\nSearching for MLOG_TABLE_DYNAMIC_META records with Table IDs:\n")
+		count := 0
+		for i, record := range records {
+			if uint8(record.Type) == 62 { // MLOG_TABLE_DYNAMIC_META
+				fmt.Printf("Record %d: %s TableID=%d Data=%s\n", i+1, record.Type.String(), record.TableID, string(record.Data))
+				count++
+				if count >= 10 { // Limit output
+					break
+				}
+			}
+		}
+		fmt.Printf("Found %d MLOG_TABLE_DYNAMIC_META records\n\n", count)
+		
+		// Show first 10 records with their Table IDs for comparison
+		fmt.Printf("First 10 records with Table IDs:\n")
+		for i := 0; i < 10 && i < len(records); i++ {
+			record := records[i]
+			fmt.Printf("Record %d: %s TableID=%d SpaceID=%d\n", i+1, record.Type.String(), record.TableID, record.SpaceID)
+		}
+		return
+	}
+
 	// Create and run TUI app
 	app := NewRedoLogApp(records, header)
 	if err := app.Run(); err != nil {
