@@ -72,9 +72,10 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 
 	// Populate record list
 	for i, record := range records {
-		recordNum := fmt.Sprintf("Record %d", i+1)
+		recordNum := fmt.Sprintf("%d", i+1)
 		recordType := record.Type.String()
-		listItem := fmt.Sprintf("%-12s %s", recordNum, recordType)
+		tableInfo := fmt.Sprintf("(%d)", record.TableID)
+		listItem := fmt.Sprintf("%-6s %s%s", recordNum, recordType, tableInfo)
 		
 		app.recordList.AddItem(listItem, "", 0, nil)
 	}
