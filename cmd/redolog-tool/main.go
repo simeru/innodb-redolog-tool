@@ -5,114 +5,267 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 	"github.com/yamaru/innodb-redolog-tool/internal/reader"
+	"github.com/yamaru/innodb-redolog-tool/internal/types"
 )
 
+var (
+	filename = flag.String("file", "", "InnoDB redo log file to analyze")
+	verbose  = flag.Bool("v", false, "Verbose output")
+)
+
+type RedoLogApp struct {
+	app           *tview.Application
+	recordList    *tview.List
+	detailsText   *tview.TextView
+	records       []*types.LogRecord
+	header        *types.RedoLogHeader
+}
+
 func main() {
-	var (
-		filename = flag.String("file", "", "InnoDB redo log file to analyze")
-		verbose  = flag.Bool("v", false, "Verbose output")
-	)
 	flag.Parse()
 
 	if *filename == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s -file <redo_log_file>\n", os.Args[0])
+		fmt.Printf("Usage: %s -file <redo_log_file>\n", os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	if *verbose {
-		fmt.Printf("Analyzing redo log file: %s\n", *filename)
-	}
-
-	// Detect format and create appropriate reader
-	logReader, err := createReader(*filename, *verbose)
+	// Load redo log data
+	records, header, err := loadRedoLogData(*filename)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating reader: %v\n", err)
-		os.Exit(1)
-	}
-	defer logReader.Close()
-
-	// Open file
-	if err := logReader.Open(*filename); err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening file: %v\n", err)
+		fmt.Printf("Error loading redo log: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Read header
-	header, err := logReader.ReadHeader()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading header: %v\n", err)
+	// Create and run TUI app
+	app := NewRedoLogApp(records, header)
+	if err := app.Run(); err != nil {
+		fmt.Printf("Error running application: %v\n", err)
 		os.Exit(1)
-	}
-
-	// Display header information
-	fmt.Println("=== InnoDB Redo Log Header ===")
-	fmt.Printf("Log Group ID: %d\n", header.LogGroupID)
-	fmt.Printf("Start LSN: %d\n", header.StartLSN)
-	fmt.Printf("File Number: %d\n", header.FileNo)
-	fmt.Printf("Created: %s\n", header.Created.Format("2006-01-02 15:04:05"))
-	fmt.Printf("Last Checkpoint: %d\n", header.LastCheckpoint)
-	fmt.Printf("Format: %d\n", header.Format)
-	fmt.Println()
-
-	// Read records
-	fmt.Println("=== Log Records ===")
-	recordCount := 0
-	maxRecords := 100 // Limit output for readability
-
-	for !logReader.IsEOF() && recordCount < maxRecords {
-		record, err := logReader.ReadRecord()
-		if err != nil {
-			if *verbose {
-				fmt.Printf("Error reading record %d: %v\n", recordCount, err)
-			}
-			break
-		}
-
-		recordCount++
-		fmt.Printf("Record %d:\n", recordCount)
-		fmt.Printf("  Type: %s\n", record.Type)
-		fmt.Printf("  LSN: %d\n", record.LSN)
-		fmt.Printf("  Length: %d bytes\n", record.Length)
-		fmt.Printf("  Transaction ID: %d\n", record.TransactionID)
-		fmt.Printf("  Timestamp: %s\n", record.Timestamp.Format("2006-01-02 15:04:05"))
-		fmt.Printf("  Table ID: %d\n", record.TableID)
-		fmt.Printf("  Index ID: %d\n", record.IndexID)
-		fmt.Printf("  Space ID: %d\n", record.SpaceID)
-		fmt.Printf("  Page Number: %d\n", record.PageNo)
-		fmt.Printf("  Offset: %d\n", record.Offset)
-		
-		if len(record.Data) > 0 {
-			fmt.Printf("  Data: %s (%d bytes)\n", string(record.Data), len(record.Data))
-		} else {
-			fmt.Printf("  Data: (empty)\n")
-		}
-		fmt.Printf("  Checksum: 0x%08X\n", record.Checksum)
-		fmt.Println()
-	}
-
-	if recordCount >= maxRecords {
-		fmt.Printf("... (showing first %d records)\n", maxRecords)
-	}
-
-	fmt.Printf("Total records analyzed: %d\n", recordCount)
-	
-	// Display file statistics
-	if info, err := os.Stat(*filename); err == nil {
-		fmt.Println("\n=== File Statistics ===")
-		fmt.Printf("File size: %d bytes\n", info.Size())
-		fmt.Printf("Header size: 64 bytes\n")
-		fmt.Printf("Records size: %d bytes\n", info.Size()-64)
-		if recordCount > 0 {
-			fmt.Printf("Average record size: %.1f bytes\n", float64(info.Size()-64)/float64(recordCount))
-		}
 	}
 }
 
-// createReader detects the redo log format and creates appropriate reader
+func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *RedoLogApp {
+	app := &RedoLogApp{
+		records: records,
+		header:  header,
+	}
+
+	// Create main application
+	app.app = tview.NewApplication()
+
+	// Create record list (left pane)
+	app.recordList = tview.NewList()
+	app.recordList.SetBorder(true)
+	app.recordList.SetTitle(" Records ")
+	app.recordList.ShowSecondaryText(false)
+
+	// Create details text view (right pane)
+	app.detailsText = tview.NewTextView()
+	app.detailsText.SetBorder(true)
+	app.detailsText.SetTitle(" Record Details ")
+	app.detailsText.SetDynamicColors(true)
+	app.detailsText.SetScrollable(true)
+
+	// Populate record list
+	for i, record := range records {
+		recordNum := fmt.Sprintf("Record %d", i+1)
+		recordType := record.Type.String()
+		listItem := fmt.Sprintf("%-12s %s", recordNum, recordType)
+		
+		app.recordList.AddItem(listItem, "", 0, nil)
+	}
+
+	// Set up selection handler
+	app.recordList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
+		if index < len(app.records) {
+			app.showRecordDetails(index)
+		}
+	})
+
+	// Set up key bindings
+	app.recordList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyTab:
+			app.app.SetFocus(app.detailsText)
+			return nil
+		case tcell.KeyEscape:
+			app.app.Stop()
+			return nil
+		case tcell.KeyEnter:
+			index := app.recordList.GetCurrentItem()
+			if index < len(app.records) {
+				app.showRecordDetails(index)
+			}
+			return nil
+		}
+		return event
+	})
+
+	app.detailsText.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyTab:
+			app.app.SetFocus(app.recordList)
+			return nil
+		case tcell.KeyEscape:
+			app.app.Stop()
+			return nil
+		}
+		return event
+	})
+
+	// Show header info initially
+	app.showHeaderInfo()
+
+	// Show first record if available
+	if len(records) > 0 {
+		app.showRecordDetails(0)
+		app.recordList.SetCurrentItem(0)
+	}
+
+	return app
+}
+
+func (app *RedoLogApp) showHeaderInfo() {
+	headerInfo := fmt.Sprintf(`[yellow]InnoDB Redo Log Header[white]
+
+Log Group ID: %d
+Start LSN: %d  
+File Number: %d
+Created: %s
+Last Checkpoint: %d
+Format: %d
+
+Total Records: %d
+
+[blue]Navigation:[white]
+↑/↓: Navigate records
+Tab: Switch panes  
+Enter: Select record
+Esc: Exit
+`,
+		app.header.LogGroupID,
+		app.header.StartLSN,
+		app.header.FileNo,
+		app.header.Created.Format("2006-01-02 15:04:05"),
+		app.header.LastCheckpoint,
+		app.header.Format,
+		len(app.records))
+
+	app.detailsText.SetText(headerInfo)
+}
+
+func (app *RedoLogApp) showRecordDetails(index int) {
+	if index >= len(app.records) {
+		return
+	}
+
+	record := app.records[index]
+	
+	details := fmt.Sprintf(`[yellow]Record %d Details[white]
+
+[green]Type:[white]           %s
+[green]LSN:[white]            %d
+[green]Length:[white]         %d bytes
+[green]Transaction ID:[white] %d
+[green]Timestamp:[white]      %s
+[green]Table ID:[white]       %d
+[green]Index ID:[white]       %d
+[green]Space ID:[white]       %d
+[green]Page Number:[white]    %d
+[green]Offset:[white]         %d
+[green]Checksum:[white]       0x%08X
+
+[green]Data:[white]
+`,
+		index+1,
+		record.Type.String(),
+		record.LSN,
+		record.Length,
+		record.TransactionID,
+		record.Timestamp.Format("2006-01-02 15:04:05"),
+		record.TableID,
+		record.IndexID,
+		record.SpaceID,
+		record.PageNo,
+		record.Offset,
+		record.Checksum)
+
+	if len(record.Data) > 0 {
+		details += fmt.Sprintf("%s (%d bytes)", string(record.Data), len(record.Data))
+	} else {
+		details += "(empty)"
+	}
+
+	app.detailsText.SetText(details)
+	app.recordList.SetCurrentItem(index)
+}
+
+func (app *RedoLogApp) Run() error {
+	// Create main layout
+	flex := tview.NewFlex()
+	flex.AddItem(app.recordList, 0, 1, true)   // Left pane (1/3)
+	flex.AddItem(app.detailsText, 0, 2, false) // Right pane (2/3)
+
+	app.app.SetRoot(flex, true)
+	app.app.SetFocus(app.recordList)
+
+	return app.app.Run()
+}
+
+func loadRedoLogData(filename string) ([]*types.LogRecord, *types.RedoLogHeader, error) {
+	// Create appropriate reader
+	readerInstance, err := createReader(filename, *verbose)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create reader: %w", err)
+	}
+	defer readerInstance.Close()
+
+	// Open the file
+	if err := readerInstance.Open(filename); err != nil {
+		return nil, nil, fmt.Errorf("failed to open file: %w", err)
+	}
+
+	// Read header
+	header, err := readerInstance.ReadHeader()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read header: %w", err)
+	}
+
+	if *verbose {
+		fmt.Printf("Loading redo log file: %s\n", filename)
+		fmt.Printf("Detected format: %d\n", header.Format)
+	}
+
+	// Read all records
+	var records []*types.LogRecord
+	recordCount := 0
+	maxRecords := 10000 // Limit for performance
+
+	for recordCount < maxRecords {
+		record, err := readerInstance.ReadRecord()
+		if err != nil {
+			if readerInstance.IsEOF() {
+				break
+			}
+			return nil, nil, fmt.Errorf("failed to read record %d: %w", recordCount+1, err)
+		}
+
+		records = append(records, record)
+		recordCount++
+	}
+
+	if *verbose {
+		fmt.Printf("Loaded %d records\n", len(records))
+	}
+
+	return records, header, nil
+}
+
 func createReader(filename string, verbose bool) (reader.RedoLogReader, error) {
-	// Check file size to determine format
 	if info, err := os.Stat(filename); err == nil {
 		// MySQL redo logs are typically large (3MB+), test fixtures are small
 		if info.Size() > 1000000 { // > 1MB suggests MySQL format
@@ -122,17 +275,9 @@ func createReader(filename string, verbose bool) (reader.RedoLogReader, error) {
 			return reader.NewMySQLRedoLogReader(), nil
 		}
 	}
-	
-	// Default to test format for small files
+
 	if verbose {
 		fmt.Printf("Using test format reader\n")
 	}
 	return reader.NewRedoLogReader(), nil
-}
-
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
 }
