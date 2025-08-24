@@ -93,7 +93,7 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 		}
 	})
 
-	// Set up mouse handler for better click support
+	// Set up mouse handler for click and scroll support
 	app.recordList.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
 		if action == tview.MouseLeftClick {
 			// Handle mouse clicks manually to ensure they work
@@ -107,6 +107,20 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 					return action, event
 				}
 			}
+		} else if action == tview.MouseScrollUp {
+			// Scroll up - move to previous record
+			current := app.recordList.GetCurrentItem()
+			if current > 0 {
+				app.recordList.SetCurrentItem(current - 1)
+			}
+			return action, event
+		} else if action == tview.MouseScrollDown {
+			// Scroll down - move to next record
+			current := app.recordList.GetCurrentItem()
+			if current < len(app.records)-1 {
+				app.recordList.SetCurrentItem(current + 1)
+			}
+			return action, event
 		}
 		return action, event
 	})
