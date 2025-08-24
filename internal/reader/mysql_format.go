@@ -70,11 +70,13 @@ type MySQLLogRecord struct {
 
 // MySQLRedoLogReader implements RedoLogReader for actual MySQL format
 type MySQLRedoLogReader struct {
-	file         *os.File
-	currentBlock MySQLLogBlockHeader
-	blockData    []byte
-	dataOffset   int
-	position     int64
+	file          *os.File
+	currentBlock  MySQLLogBlockHeader
+	blockData     []byte
+	dataOffset    int
+	position      int64
+	baseTimestamp time.Time // File modification time for realistic timestamp calculation
+	baseLSN       uint64    // First LSN encountered for relative timestamp calculation
 }
 
 // NewMySQLRedoLogReader creates a new MySQL format redo log reader
@@ -96,8 +98,15 @@ func (r *MySQLRedoLogReader) Open(filename string) error {
 
 // ReadHeader reads the MySQL redo log file header
 func (r *MySQLRedoLogReader) ReadHeader() (*types.RedoLogHeader, error) {
+	// Get actual file modification time for realistic timestamp calculation
+	fileInfo, err := r.file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file info: %w", err)
+	}
+	r.baseTimestamp = fileInfo.ModTime()
+
 	// Skip to after file header (first actual log block)
-	_, err := r.file.Seek(LogFileHdrSize, io.SeekStart)
+	_, err = r.file.Seek(LogFileHdrSize, io.SeekStart)
 	if err != nil {
 		return nil, fmt.Errorf("failed to seek to log blocks: %w", err)
 	}
@@ -109,12 +118,15 @@ func (r *MySQLRedoLogReader) ReadHeader() (*types.RedoLogHeader, error) {
 		return nil, fmt.Errorf("failed to read first block header: %w", err)
 	}
 
+	// Set base LSN for relative timestamp calculation
+	r.baseLSN = uint64(LogFileHdrSize)
+
 	// Create a simplified header for compatibility
 	header := &types.RedoLogHeader{
 		LogGroupID:     uint64(blockHeader.EpochNo)<<32 | uint64(blockHeader.HdrNo),
-		StartLSN:       uint64(LogFileHdrSize), // Start after file header
+		StartLSN:       r.baseLSN,
 		FileNo:         1,
-		Created:        time.Now(), // Would need to parse from file header
+		Created:        r.baseTimestamp, // Use actual file timestamp
 		LastCheckpoint: 0,
 		Format:         2, // Indicate MySQL format
 	}
@@ -305,12 +317,19 @@ func (r *MySQLRedoLogReader) parseValidRecord(recordType uint8) (*types.LogRecor
 		recordData = []byte{recordType}
 	}
 
+	// Calculate realistic timestamp based on LSN progression
+	currentLSN := uint64(r.position + int64(r.dataOffset))
+	lsnDiff := currentLSN - r.baseLSN
+	// Assume LSN progression represents time progression: 1000 LSN units ≈ 1 millisecond
+	relativeTimeMs := lsnDiff / 1000
+	recordTimestamp := r.baseTimestamp.Add(time.Duration(relativeTimeMs) * time.Millisecond)
+
 	record := &types.LogRecord{
 		Type:          types.LogType(recordType), // Store raw type for now
-		LSN:           uint64(r.position + int64(r.dataOffset)),
+		LSN:           currentLSN,
 		Length:        recordLength,
 		TransactionID: 0, // Not directly available in redo log records
-		Timestamp:     time.Now(), // Not stored in redo log
+		Timestamp:     recordTimestamp, // Calculated based on LSN progression
 		TableID:       0, // Would need complex parsing to extract
 		SpaceID:       spaceID,
 		PageNo:        pageNo,
