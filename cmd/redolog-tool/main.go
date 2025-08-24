@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
@@ -14,6 +16,7 @@ import (
 var (
 	filename = flag.String("file", "", "InnoDB redo log file to analyze")
 	verbose  = flag.Bool("v", false, "Verbose output")
+	testMode = flag.Bool("test", false, "Test hex parsing without TUI")
 )
 
 type RedoLogApp struct {
@@ -98,6 +101,26 @@ func main() {
 			fmt.Printf("No MLOG_REC_INSERT_8027 records found\n")
 		}
 		fmt.Printf("Found %d MLOG_REC_INSERT_8027 records\n\n", insertCount)
+		
+		// Test hex parsing with user's example
+		fmt.Printf("Hex parsing test (user example):\n")
+		testHex := "000000000503c20000"
+		hexBytes, _ := hex.DecodeString(testHex)
+		if len(hexBytes) > 0 {
+			// Test our parsing functions
+			fmt.Printf("Input: hex=%s\n", testHex)
+			
+			// Test as different field types
+			if len(hexBytes) >= 4 {
+				// Test integer parsing
+				fmt.Printf("As 4-byte integer: %d\n", binary.BigEndian.Uint32(hexBytes[:4]))
+			}
+			
+			// Test field parsing with simple heuristics
+			fieldResult := testParseFields(hexBytes)
+			fmt.Printf("Field parsing result: %s\n", fieldResult)
+		}
+		fmt.Printf("\n")
 		
 		// Show footer simulation
 		fmt.Printf("Footer display simulation:\n")
@@ -193,6 +216,35 @@ func main() {
 			
 			fmt.Printf("%s%s%-6s %s%s Group=%d\n", colorPrefix, groupIndicator, recordNum, recordType, idInfo, record.MultiRecordGroup)
 		}
+		return
+	}
+
+	// Test mode: parse specific hex data and exit
+	if *testMode {
+		fmt.Printf("Test mode: Parsing hex data examples\n\n")
+		
+		// Test the user's example: 000000000503c20000
+		testHex := "000000000503c20000"
+		fmt.Printf("Testing hex: %s\n", testHex)
+		hexBytes, err := hex.DecodeString(testHex)
+		if err != nil {
+			fmt.Printf("Error decoding hex: %v\n", err)
+		} else {
+			fieldResult := testParseFields(hexBytes)
+			fmt.Printf("Field parsing result: %s\n\n", fieldResult)
+		}
+		
+		// Test another example from the user's data: 00000115027108000000000000004a00c6fbfe7e0101000900018008800680
+		testHex2 := "00000115027108000000000000004a00c6fbfe7e0101000900018008800680"
+		fmt.Printf("Testing hex: %s\n", testHex2)
+		hexBytes2, err := hex.DecodeString(testHex2)
+		if err != nil {
+			fmt.Printf("Error decoding hex: %v\n", err)
+		} else {
+			fieldResult2 := testParseFields(hexBytes2)
+			fmt.Printf("Field parsing result: %s\n\n", fieldResult2)
+		}
+		
 		return
 	}
 
@@ -621,6 +673,11 @@ func createReader(filename string, verbose bool) (reader.RedoLogReader, error) {
 		fmt.Printf("Using test format reader\n")
 	}
 	return reader.NewRedoLogReader(), nil
+}
+
+// testParseFields is a simple test function for parsing hex data
+func testParseFields(data []byte) string {
+	return reader.ParseRecordDataAsFields(data)
 }
 
 // updateFilteredRecords applies the current filter settings

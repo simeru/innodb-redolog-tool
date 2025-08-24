@@ -431,15 +431,272 @@ func (r *MySQLRedoLogReader) parseRecordData8027() string {
 		recordBytes := r.blockData[r.dataOffset:r.dataOffset+actualDataLen]
 		r.dataOffset += actualDataLen
 		
-		// Try to extract readable strings from record data
-		readableData := extractReadableStrings(recordBytes)
-		if len(readableData) > 0 {
-			result = append(result, fmt.Sprintf("data='%s'", readableData))
-		}
+		// Try to parse as human-readable fields
+		// Note: We don't have full index metadata, so this is best-effort parsing
+		fieldParseResult := parseRecordDataAsFields(recordBytes, 3) // Assume up to 3 fields for common cases
+		result = append(result, fieldParseResult)
+		
+		// Keep hex for reference
 		result = append(result, fmt.Sprintf("data_hex=%x", recordBytes))
 	}
 	
 	return fmt.Sprintf("record_data=(%s)", strings.Join(result, ","))
+}
+
+// InnoDB Record Data Type Constants (from data0type.h)
+const (
+	DATA_VARCHAR   = 1  // Variable-length string
+	DATA_CHAR      = 2  // Fixed-length string
+	DATA_FIXBINARY = 3  // Fixed binary data
+	DATA_BINARY    = 4  // Variable binary data
+	DATA_BLOB      = 5  // BLOB/TEXT data
+	DATA_INT       = 6  // Integer (1-8 bytes)
+	DATA_FLOAT     = 9  // Float
+	DATA_DOUBLE    = 10 // Double
+	DATA_DECIMAL   = 11 // Decimal as ASCII
+	DATA_VARMYSQL  = 12 // VARCHAR with charset
+	DATA_MYSQL     = 13 // CHAR with charset
+)
+
+// InnoDB Data Flags (from data0type.h)
+const (
+	DATA_UNSIGNED = 0x0020 // Unsigned integer flag
+)
+
+// Field descriptor for parsing
+type FieldDescriptor struct {
+	Type       uint32 // DATA_* constant
+	Length     uint16 // Field length
+	IsNullable bool   // Can be NULL
+	IsUnsigned bool   // For integer types
+}
+
+// parseRecordDataAsFields attempts to decode hex record data into human-readable fields
+func parseRecordDataAsFields(data []byte, numFields int) string {
+	if len(data) == 0 || numFields == 0 {
+		return fmt.Sprintf("raw_hex=%x", data)
+	}
+	
+	results := make([]string, 0)
+	
+	// Simple heuristic-based field parsing since we don't have full index metadata
+	// This is a best-effort approach based on common patterns
+	
+	offset := 0
+	for fieldIndex := 0; fieldIndex < numFields && offset < len(data); fieldIndex++ {
+		fieldResult, bytesUsed := parseFieldAtOffset(data[offset:], fieldIndex)
+		if bytesUsed == 0 {
+			break
+		}
+		
+		results = append(results, fmt.Sprintf("field_%d=%s", fieldIndex, fieldResult))
+		offset += bytesUsed
+	}
+	
+	// Add remaining bytes as hex if any
+	if offset < len(data) {
+		remaining := data[offset:]
+		results = append(results, fmt.Sprintf("remaining_hex=%x", remaining))
+	}
+	
+	return fmt.Sprintf("fields=(%s)", strings.Join(results, ","))
+}
+
+// parseFieldAtOffset attempts to parse a field at the given offset
+func parseFieldAtOffset(data []byte, fieldIndex int) (result string, bytesUsed int) {
+	if len(data) == 0 {
+		return "empty", 0
+	}
+	
+	// Try different parsing strategies based on data patterns
+	
+	// Strategy 1: Check if it looks like a length-prefixed string (VARCHAR)
+	if len(data) >= 2 {
+		if stringResult, used := tryParseVarchar(data); used > 0 {
+			return stringResult, used
+		}
+	}
+	
+	// Strategy 2: Check if it looks like an integer (common lengths: 1,2,4,8)
+	if len(data) >= 4 {
+		if intResult, used := tryParseInteger(data); used > 0 {
+			return intResult, used
+		}
+	}
+	
+	// Strategy 3: Fixed-length patterns
+	if len(data) >= 8 {
+		// Try as 8-byte integer or datetime
+		if int64Result, used := tryParse8ByteValue(data); used > 0 {
+			return int64Result, used
+		}
+	}
+	
+	// Fallback: Return first few bytes as hex
+	maxBytes := len(data)
+	if maxBytes > 8 {
+		maxBytes = 8
+	}
+	
+	return fmt.Sprintf("hex=%x", data[:maxBytes]), maxBytes
+}
+
+// tryParseVarchar attempts to parse data as a VARCHAR field
+func tryParseVarchar(data []byte) (result string, bytesUsed int) {
+	if len(data) < 1 {
+		return "", 0
+	}
+	
+	// Try 1-byte length prefix
+	if data[0] <= 127 && len(data) >= int(data[0])+1 {
+		length := int(data[0])
+		if length == 0 {
+			return "varchar=''", 1
+		}
+		
+		if len(data) >= length+1 {
+			stringData := data[1 : length+1]
+			// Check if it contains valid UTF-8/ASCII characters
+			if isValidStringData(stringData) {
+				return fmt.Sprintf("varchar='%s'", sanitizeString(stringData)), length + 1
+			}
+		}
+	}
+	
+	// Try 2-byte length prefix (for longer strings)
+	if len(data) >= 2 {
+		length := int(binary.BigEndian.Uint16(data[0:2]))
+		if length > 0 && length < 1000 && len(data) >= length+2 { // Reasonable length limit
+			stringData := data[2 : length+2]
+			if isValidStringData(stringData) {
+				return fmt.Sprintf("varchar='%s'", sanitizeString(stringData)), length + 2
+			}
+		}
+	}
+	
+	return "", 0
+}
+
+// tryParseInteger attempts to parse data as an integer using MySQL's format
+func tryParseInteger(data []byte) (result string, bytesUsed int) {
+	// Try common integer sizes: 1, 2, 4, 8 bytes
+	sizes := []int{1, 2, 4, 8}
+	
+	for _, size := range sizes {
+		if len(data) >= size {
+			value := machReadIntType(data[:size], size, false) // Try as signed first
+			unsignedValue := machReadIntType(data[:size], size, true)
+			
+			// Use heuristics to choose signed vs unsigned
+			if value < 0 && unsignedValue < 1000000 {
+				// If signed is negative but unsigned is reasonable, prefer signed
+				return fmt.Sprintf("int_%db=%d", size, value), size
+			} else if unsignedValue < 1000000 {
+				// For reasonable positive values, show both
+				return fmt.Sprintf("int_%db=%d(unsigned=%d)", size, value, unsignedValue), size
+			} else {
+				// For large values, might be ID or timestamp
+				return fmt.Sprintf("int_%db=%d", size, value), size
+			}
+		}
+	}
+	
+	return "", 0
+}
+
+// tryParse8ByteValue attempts to parse 8-byte values as various types
+func tryParse8ByteValue(data []byte) (result string, bytesUsed int) {
+	if len(data) < 8 {
+		return "", 0
+	}
+	
+	// Parse as 64-bit integer
+	intValue := machReadIntType(data[:8], 8, false)
+	unsignedValue := machReadIntType(data[:8], 8, true)
+	
+	results := make([]string, 0)
+	results = append(results, fmt.Sprintf("int64=%d", intValue))
+	
+	if unsignedValue != uint64(intValue) {
+		results = append(results, fmt.Sprintf("uint64=%d", unsignedValue))
+	}
+	
+	// Try to interpret as timestamp (if in reasonable range)
+	if unsignedValue > 1000000000 && unsignedValue < 4000000000 { // Rough Unix timestamp range
+		timestamp := time.Unix(int64(unsignedValue), 0)
+		results = append(results, fmt.Sprintf("timestamp='%s'", timestamp.Format("2006-01-02 15:04:05")))
+	}
+	
+	return fmt.Sprintf("int64_types=(%s)", strings.Join(results, ",")), 8
+}
+
+// machReadIntType implements MySQL's mach_read_int_type function
+func machReadIntType(data []byte, length int, unsigned bool) uint64 {
+	if len(data) < length || length == 0 {
+		return 0
+	}
+	
+	var ret uint64
+	
+	// Initialize with 0 for unsigned, or sign-extend for signed
+	if unsigned || (data[0]&0x80) != 0 {
+		ret = 0x0000000000000000
+	} else {
+		ret = 0xFFFFFFFFFFFFFF00
+	}
+	
+	// Handle first byte with sign bit processing for signed integers
+	if unsigned {
+		ret |= uint64(data[0])
+	} else {
+		ret |= uint64(data[0] ^ 0x80) // XOR with 0x80 for sign bit handling
+	}
+	
+	// Process remaining bytes
+	for i := 1; i < length; i++ {
+		ret <<= 8
+		ret |= uint64(data[i])
+	}
+	
+	return ret
+}
+
+// isValidStringData checks if byte data looks like valid string content
+func isValidStringData(data []byte) bool {
+	if len(data) == 0 {
+		return true
+	}
+	
+	// Check for printable ASCII/UTF-8 characters
+	validChars := 0
+	for _, b := range data {
+		if (b >= 32 && b <= 126) || // Printable ASCII
+			b == 9 || b == 10 || b == 13 || // Tab, LF, CR
+			(b >= 128) { // Potential UTF-8
+			validChars++
+		}
+	}
+	
+	// At least 70% of characters should be valid
+	return float64(validChars)/float64(len(data)) >= 0.7
+}
+
+// sanitizeString cleans up string data for display
+func sanitizeString(data []byte) string {
+	result := make([]byte, 0, len(data))
+	for _, b := range data {
+		if (b >= 32 && b <= 126) || b == 9 { // Printable ASCII + tab
+			result = append(result, b)
+		} else if b == 10 || b == 13 { // LF, CR
+			result = append(result, ' ') // Replace with space
+		} else if b >= 128 { // Potential UTF-8
+			result = append(result, b)
+		} else {
+			// Replace non-printable with placeholder
+			result = append(result, '?')
+		}
+	}
+	return string(result)
 }
 
 // parseValidRecord parses a record with a validated record type
@@ -809,4 +1066,141 @@ func (r *MySQLRedoLogReader) Close() error {
 		return r.file.Close()
 	}
 	return nil
+}
+
+
+// ParseRecordDataAsFields attempts to parse binary data as database fields
+func ParseRecordDataAsFields(data []byte) string {
+	if len(data) == 0 {
+		return "empty"
+	}
+	
+	results := make([]string, 0)
+	offset := 0
+	
+	// First pass: Try to identify meaningful VARCHAR fields
+	for offset < len(data) {
+		remaining := data[offset:]
+		if len(remaining) == 0 {
+			break
+		}
+		
+		// Try VARCHAR parsing with meaningful content
+		if varcharStr, used := tryParseVarcharMeaningful(remaining); used > 0 {
+			results = append(results, varcharStr)
+			offset += used
+			continue
+		}
+		
+		// Try compressed integer parsing (MySQL style)
+		if compVal, used := tryParseCompressedUint(remaining); used > 0 {
+			results = append(results, fmt.Sprintf("compressed_uint=%d", compVal))
+			offset += used
+			continue
+		}
+		
+		// Try standard integers (prefer 4-byte for meaningful values)
+		if len(remaining) >= 4 {
+			val32 := machReadIntType(remaining, 4, true)
+			if val32 > 0 && val32 < 1000000 { // Reasonable range
+				results = append(results, fmt.Sprintf("u32=%d", val32))
+				offset += 4
+				continue
+			}
+		}
+		
+		// Try 1-byte values
+		if len(remaining) >= 1 {
+			val8 := remaining[0]
+			if val8 > 0 && val8 < 128 { // ASCII or small numbers
+				results = append(results, fmt.Sprintf("u8=%d", val8))
+			} else {
+				results = append(results, fmt.Sprintf("byte=0x%02x", val8))
+			}
+			offset += 1
+			continue
+		}
+		
+		break
+	}
+	
+	// If we have remaining data, show it as hex
+	if offset < len(data) {
+		remaining := data[offset:]
+		if len(remaining) <= 8 {
+			results = append(results, fmt.Sprintf("hex=%x", remaining))
+		} else {
+			results = append(results, fmt.Sprintf("hex=%x...", remaining[:8]))
+		}
+	}
+	
+	return fmt.Sprintf("fields=[%s]", strings.Join(results, " "))
+}
+
+// tryParseVarcharMeaningful only parses VARCHAR if it contains meaningful content
+func tryParseVarcharMeaningful(data []byte) (result string, bytesUsed int) {
+	if len(data) == 0 {
+		return "", 0
+	}
+	
+	// Try single-byte length prefix
+	if data[0] > 0 && data[0] <= 50 && len(data) >= int(data[0])+1 {
+		length := int(data[0])
+		stringData := data[1 : length+1]
+		if isMeaningfulString(stringData) {
+			return fmt.Sprintf("varchar='%s'", sanitizeString(stringData)), length + 1
+		}
+	}
+	
+	return "", 0
+}
+
+// isMeaningfulString checks if string data contains actual readable content
+func isMeaningfulString(data []byte) bool {
+	if len(data) < 2 { // Too short to be meaningful
+		return false
+	}
+	
+	printableCount := 0
+	for _, b := range data {
+		if b >= 32 && b <= 126 { // Printable ASCII
+			printableCount++
+		} else if b == 0 { // Null terminator is OK
+			break
+		} else {
+			// Non-printable characters make it less likely to be a string
+			return false
+		}
+	}
+	
+	// Must be mostly printable and have some content
+	return printableCount >= 2 && printableCount >= len(data)*8/10
+}
+
+// tryParseCompressedUint parses MySQL compressed integers
+func tryParseCompressedUint(data []byte) (value uint64, bytesUsed int) {
+	if len(data) == 0 {
+		return 0, 0
+	}
+	
+	firstByte := data[0]
+	
+	if firstByte < 0x80 {
+		// Single byte value
+		return uint64(firstByte), 1
+	} else if firstByte < 0xC0 && len(data) >= 2 {
+		// Two byte value
+		return uint64(firstByte&0x3F)<<8 | uint64(data[1]), 2
+	} else if firstByte < 0xE0 && len(data) >= 3 {
+		// Three byte value
+		return uint64(firstByte&0x1F)<<16 | uint64(data[1])<<8 | uint64(data[2]), 3
+	} else if firstByte < 0xF0 && len(data) >= 4 {
+		// Four byte value
+		return uint64(firstByte&0x0F)<<24 | uint64(data[1])<<16 | uint64(data[2])<<8 | uint64(data[3]), 4
+	} else if firstByte < 0xF8 && len(data) >= 5 {
+		// Five byte value
+		return uint64(firstByte&0x07)<<32 | uint64(data[1])<<24 | uint64(data[2])<<16 | uint64(data[3])<<8 | uint64(data[4]), 5
+	}
+	
+	return 0, 0
 }
