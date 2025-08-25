@@ -69,6 +69,10 @@ go build -o bin/redolog-tool ./cmd/redolog-tool
 
 # Verbose analysis output
 ./bin/redolog-tool --file ib_logfile0 -v
+
+# Export to JSON/CSV (skips TUI)
+./bin/redolog-tool --file ib_logfile0 --export json --output data.json
+./bin/redolog-tool --file ib_logfile0 --export csv --output data.csv
 ```
 
 ## 🎯 Key Features
@@ -94,6 +98,13 @@ Record Types: 50+ MLOG types supported
 - **Keyboard Navigation**: Arrow keys, Tab, Enter for seamless browsing
 - **Multi-Record Groups**: Visual MTR (Mini-Transaction) boundary display
 - **Mouse Support**: Click navigation and scroll wheel support
+- **Real-time Search**: '/' to search, n/N to navigate results
+
+### ✅ Data Export & Analysis
+- **JSON Export**: Complete structured data with metadata and statistics
+- **CSV Export**: Spreadsheet-compatible format for analysis tools
+- **Flexible Output**: Console output or file export (--output filename)
+- **Data Integrity**: Proper escaping and formatting for both formats
 
 ### ✅ Real Data Validation
 ```bash
@@ -278,6 +289,18 @@ time ./bin/redolog-tool --file large_redo_log.log -v
 
 # Monitor redo log activity (combine with tail)
 tail -f /var/lib/mysql/mysql.log | ./bin/redolog-tool --file ib_logfile0
+```
+
+### Data Export & Integration
+```bash
+# Export complete analysis to JSON for further processing
+./bin/redolog-tool --file ib_logfile0 --export json --output analysis.json
+
+# Export to CSV for Excel/database import
+./bin/redolog-tool --file ib_logfile0 --export csv --output records.csv
+
+# Pipe JSON to jq for specific field extraction
+./bin/redolog-tool --file ib_logfile0 --export json | jq '.records[].LSN'
 ```
 
 ## 🏆 Project Results
