@@ -1339,136 +1339,207 @@ func getTypeInfoMap() map[uint8]*TypeInfo {
 		1: {
 			ID: 1, Name: "MLOG_1BYTE", Category: "Basic Byte Operations",
 			Description: "Write 1 byte to a page",
-			Format: `[cyan]═══ MLOG_1BYTE Format ═══[white]
+			Format: `[cyan]═══ MLOG_1BYTE Format within 512-byte Block ═══[white]
 
-[yellow]Header (Type-Length-SpaceID-PageNo):[white]
-• Type:     1 byte  (0x01)
-• Length:   Compressed (1-5 bytes)
-• Space ID: Compressed (1-5 bytes)
-• Page No:  Compressed (1-5 bytes)
+[yellow]512-Byte Block Structure:[white]
+[cyan]Block Header (12 bytes):[white]
+  Offset 0-3:   Block Number (4 bytes)
+  Offset 4-5:   Data Length (2 bytes)
+  Offset 6-7:   First Record Group Offset (2 bytes)
+  Offset 8-11:  Epoch Number (4 bytes)
 
-[yellow]Body:[white]
-• Offset:   2 bytes (Page offset where to write)
-• Value:    1 byte  (Value to write)
+[cyan]Record Data Area (496 bytes available):[white]
+[yellow]MLOG_1BYTE Record Format:[white]
+  Byte 0:       Type = 0x01 (1 byte)
+  Byte 1:       Length (compressed 1-5 bytes)
+  Byte 2-6:     Space ID (compressed 1-5 bytes)
+  Byte 7-11:    Page Number (compressed 1-5 bytes)
+  Byte 12-13:   Page Offset (2 bytes)
+  Byte 14:      Value to write (1 byte)
 
-[green]Total Size: ~7-18 bytes (depending on compression)[white]
-[gray]Used for small atomic updates to page headers or flags[white]`,
+[cyan]Block Trailer (4 bytes):[white]
+  Offset 508-511: Checksum (4 bytes)
+
+[green]Record Size: 7-18 bytes[white]
+[green]Block Utilization: ~1.4-3.6% of data area[white]
+[gray]Multiple MLOG_1BYTE records can fit in single block[white]
+[gray]Remaining space: 478-489 bytes available for other records[white]`,
 		},
 		2: {
 			ID: 2, Name: "MLOG_2BYTES", Category: "Basic Byte Operations",
 			Description: "Write 2 bytes to a page",
-			Format: `[cyan]═══ MLOG_2BYTES Format ═══[white]
+			Format: `[cyan]═══ MLOG_2BYTES Format within 512-byte Block ═══[white]
 
-[yellow]Header:[white]
-• Type:     1 byte  (0x02)
-• Length:   Compressed (1-5 bytes)
-• Space ID: Compressed (1-5 bytes)
-• Page No:  Compressed (1-5 bytes)
+[yellow]512-Byte Block Structure:[white]
+[cyan]Block Header (12 bytes):[white]
+  Offset 0-3:   Block Number (4 bytes)
+  Offset 4-5:   Data Length (2 bytes) 
+  Offset 6-7:   First Record Group Offset (2 bytes)
+  Offset 8-11:  Epoch Number (4 bytes)
 
-[yellow]Body:[white]
-• Offset:   2 bytes (Page offset)
-• Value:    2 bytes (Value to write)
+[cyan]Record Data Area (496 bytes available):[white]
+[yellow]MLOG_2BYTES Record Format:[white]
+  Byte 0:       Type = 0x02 (1 byte)
+  Byte 1:       Length (compressed 1-5 bytes)
+  Byte 2-6:     Space ID (compressed 1-5 bytes)  
+  Byte 7-11:    Page Number (compressed 1-5 bytes)
+  Byte 12-13:   Page Offset (2 bytes)
+  Byte 14-15:   Value to write (2 bytes)
 
-[green]Total Size: ~8-19 bytes[white]
-[gray]Used for updating 16-bit values like counts or small offsets[white]`,
+[cyan]Block Trailer (4 bytes):[white]
+  Offset 508-511: Checksum (4 bytes)
+
+[green]Record Size: 8-19 bytes[white]
+[green]Block Utilization: ~1.6-3.8% of data area[white]
+[gray]Multiple MLOG_2BYTES records can fit in single block[white]
+[gray]Remaining space: 477-488 bytes available for other records[white]`,
 		},
 		4: {
 			ID: 4, Name: "MLOG_4BYTES", Category: "Basic Byte Operations",
 			Description: "Write 4 bytes to a page",
-			Format: `[cyan]═══ MLOG_4BYTES Format ═══[white]
+			Format: `[cyan]═══ MLOG_4BYTES Format within 512-byte Block ═══[white]
 
-[yellow]Header:[white]
-• Type:     1 byte  (0x04)
-• Length:   Compressed (1-5 bytes)
-• Space ID: Compressed (1-5 bytes)
-• Page No:  Compressed (1-5 bytes)
+[yellow]512-Byte Block Structure:[white]
+[cyan]Block Header (12 bytes):[white]
+  Offset 0-3:   Block Number (4 bytes)
+  Offset 4-5:   Data Length (2 bytes)
+  Offset 6-7:   First Record Group Offset (2 bytes)
+  Offset 8-11:  Epoch Number (4 bytes)
 
-[yellow]Body:[white]
-• Offset:   2 bytes (Page offset)
-• Value:    4 bytes (Value to write)
+[cyan]Record Data Area (496 bytes available):[white]
+[yellow]MLOG_4BYTES Record Format:[white]
+  Byte 0:       Type = 0x04 (1 byte)
+  Byte 1:       Length (compressed 1-5 bytes)
+  Byte 2-6:     Space ID (compressed 1-5 bytes)
+  Byte 7-11:    Page Number (compressed 1-5 bytes)
+  Byte 12-13:   Page Offset (2 bytes)
+  Byte 14-17:   Value to write (4 bytes)
 
-[green]Total Size: ~10-21 bytes[white]
-[gray]Used for 32-bit values like page numbers, checksums[white]`,
+[cyan]Block Trailer (4 bytes):[white]
+  Offset 508-511: Checksum (4 bytes)
+
+[green]Record Size: 10-21 bytes[white]
+[green]Block Utilization: ~2.0-4.2% of data area[white]
+[gray]Used for 32-bit values like page numbers, checksums[white]
+[gray]Remaining space: 475-486 bytes available for other records[white]`,
 		},
 		8: {
 			ID: 8, Name: "MLOG_8BYTES", Category: "Basic Byte Operations",
 			Description: "Write 8 bytes to a page",
-			Format: `[cyan]═══ MLOG_8BYTES Format ═══[white]
+			Format: `[cyan]═══ MLOG_8BYTES Format within 512-byte Block ═══[white]
 
-[yellow]Header:[white]
-• Type:     1 byte  (0x08)
-• Length:   Compressed (1-5 bytes)
-• Space ID: Compressed (1-5 bytes)
-• Page No:  Compressed (1-5 bytes)
+[yellow]512-Byte Block Structure:[white]
+[cyan]Block Header (12 bytes):[white]
+  Offset 0-3:   Block Number (4 bytes)
+  Offset 4-5:   Data Length (2 bytes)
+  Offset 6-7:   First Record Group Offset (2 bytes)
+  Offset 8-11:  Epoch Number (4 bytes)
 
-[yellow]Body:[white]
-• Offset:   2 bytes (Page offset)
-• Value:    8 bytes (Value to write)
+[cyan]Record Data Area (496 bytes available):[white]
+[yellow]MLOG_8BYTES Record Format:[white]
+  Byte 0:       Type = 0x08 (1 byte)
+  Byte 1:       Length (compressed 1-5 bytes)
+  Byte 2-6:     Space ID (compressed 1-5 bytes)
+  Byte 7-11:    Page Number (compressed 1-5 bytes)
+  Byte 12-13:   Page Offset (2 bytes)
+  Byte 14-21:   Value to write (8 bytes)
 
-[green]Total Size: ~14-25 bytes[white]
-[gray]Used for 64-bit values like LSN, transaction IDs[white]`,
+[cyan]Block Trailer (4 bytes):[white]
+  Offset 508-511: Checksum (4 bytes)
+
+[green]Record Size: 14-25 bytes[white]
+[green]Block Utilization: ~2.8-5.0% of data area[white]
+[gray]Used for 64-bit values like LSN, transaction IDs[white]
+[gray]Remaining space: 471-482 bytes available for other records[white]`,
 		},
 
 		// Record operations
 		9: {
 			ID: 9, Name: "MLOG_REC_INSERT_8027", Category: "Record Operations (Old Format)",
 			Description: "Insert a record (old format)",
-			Format: `[cyan]═══ MLOG_REC_INSERT_8027 Format ═══[white]
+			Format: `[cyan]═══ MLOG_REC_INSERT_8027 Format within 512-byte Block ═══[white]
 
-[yellow]Header:[white]
-• Type:     1 byte  (0x09)
-• Space ID: Compressed (1-5 bytes)
-• Page No:  Compressed (1-5 bytes)
+[yellow]512-Byte Block Structure:[white]
+[cyan]Block Header (12 bytes):[white]
+  Offset 0-3:   Block Number (4 bytes)
+  Offset 4-5:   Data Length (2 bytes)
+  Offset 6-7:   First Record Group Offset (2 bytes)
+  Offset 8-11:  Epoch Number (4 bytes)
 
-[yellow]Body:[white]
-• Cursor Position:  2 bytes
-• Record End Offset: 2 bytes  
-• Info & Status:    1 byte
-• Origin Offset:    Variable (compressed)
-• Mismatch Index:   Variable (compressed)
-• Record Data:      Variable length
+[cyan]Record Data Area (496 bytes available):[white]
+[yellow]MLOG_REC_INSERT_8027 Record Format:[white]
+  Byte 0:       Type = 0x09 (1 byte)
+  Byte 1-5:     Space ID (compressed 1-5 bytes)
+  Byte 6-10:    Page Number (compressed 1-5 bytes)
+  Byte 11-12:   Cursor Position (2 bytes)
+  Byte 13-14:   Record End Offset (2 bytes)
+  Byte 15:      Info & Status Bits (1 byte)
+  Byte 16-20:   Origin Offset (compressed 1-5 bytes)
+  Byte 21-25:   Mismatch Index (compressed 1-5 bytes)
+  Byte 26-N:    Record Data (variable length)
+                ├─ Record Header (5-8 bytes typical)
+                ├─ Column Data (variable per column)
+                └─ Field Offsets (variable)
 
-[green]Structure Details:[white]
-• Cursor points to location for insert
-• Record data includes all column values
-• Info bits contain delete mark and min rec mark
+[cyan]Block Trailer (4 bytes):[white]
+  Offset 508-511: Checksum (4 bytes)
 
-[gray]Legacy format from MySQL 8.0.27 and earlier[white]`,
+[green]Typical Record Size: 30-200 bytes[white]
+[green]Block Utilization: ~6-40% of data area[white]
+[yellow]Info Bits Detail:[white]
+• Bit 0: Delete mark flag
+• Bit 1: Min record flag  
+• Bits 2-7: Reserved
+
+[gray]Legacy format from MySQL 8.0.27 and earlier[white]
+[gray]Can contain complete row data for INSERT operations[white]`,
 		},
 		67: {
 			ID: 67, Name: "MLOG_REC_INSERT", Category: "Record Operations (Current)",
 			Description: "Insert record (current format)",
-			Format: `[cyan]═══ MLOG_REC_INSERT Format ═══[white]
+			Format: `[cyan]═══ MLOG_REC_INSERT Format within 512-byte Block ═══[white]
 
-[yellow]Header:[white]
-• Type:     1 byte  (0x43)
-• Space ID: Compressed (1-5 bytes)
-• Page No:  Compressed (1-5 bytes)
+[yellow]512-Byte Block Structure:[white]
+[cyan]Block Header (12 bytes):[white]
+  Offset 0-3:   Block Number (4 bytes)
+  Offset 4-5:   Data Length (2 bytes)
+  Offset 6-7:   First Record Group Offset (2 bytes)
+  Offset 8-11:  Epoch Number (4 bytes)
 
-[yellow]Index Info Section:[white]
-• Has Index Info: 1 bit flag
-• N_uniq:        Compressed (if flag set)
-• N_fields:      Compressed (if flag set)
-• Field Types:   Variable array
+[cyan]Record Data Area (496 bytes available):[white]
+[yellow]MLOG_REC_INSERT Record Format:[white]
+  Byte 0:       Type = 0x43 (1 byte)
+  Byte 1-5:     Space ID (compressed 1-5 bytes)
+  Byte 6-10:    Page Number (compressed 1-5 bytes)
+  
+[yellow]Index Info Section (if present):[white]
+  Byte 11:      Flags (1 byte) - bit 0: has index info
+  Byte 12-16:   N_uniq (compressed 1-5 bytes, if flag set)
+  Byte 17-21:   N_fields (compressed 1-5 bytes, if flag set)
+  Byte 22-N:    Field Type Array (variable, if flag set)
 
 [yellow]Record Section:[white]
-• Cursor Position: 2 bytes
-• Record Size:     Compressed
-• Extra Size:      1 byte
-• Info & Status:   1 byte
-• Record Data:     Variable
+  Byte X:       Cursor Position (2 bytes)
+  Byte X+2:     Record Size (compressed 1-5 bytes)
+  Byte X+7:     Extra Size (1 byte)
+  Byte X+8:     Info & Status Bits (1 byte)
+  Byte X+9-N:   Record Data
+                ├─ Null Bitmap ((n_fields+7)/8 bytes)
+                ├─ Variable Field Lengths (per VARCHAR/BLOB)
+                └─ Field Data (actual column values)
 
-[yellow]Record Data Format:[white]
-• Null bitmap:     (n_fields + 7) / 8 bytes
-• Variable lengths: For each VARCHAR/BLOB
-• Field data:      Actual column values
+[cyan]Block Trailer (4 bytes):[white]
+  Offset 508-511: Checksum (4 bytes)
 
-[green]Optimizations:[white]
+[green]Typical Record Size: 25-300 bytes[white]
+[green]Block Utilization: ~5-60% of data area[white]
+[yellow]Optimizations:[white]
 • Instant ADD COLUMN support
-• Online DDL compatibility
-• Compressed metadata
+• Online DDL compatibility  
+• Compressed metadata encoding
 
-[gray]Current format since MySQL 8.0.28[white]`,
+[gray]Current format since MySQL 8.0.28[white]
+[gray]Can span multiple blocks for very large records[white]`,
 		},
 		70: {
 			ID: 70, Name: "MLOG_REC_UPDATE_IN_PLACE", Category: "Record Operations (Current)",
@@ -1599,25 +1670,40 @@ For each field update:
 		31: {
 			ID: 31, Name: "MLOG_MULTI_REC_END", Category: "Transaction Control",
 			Description: "Multi-record group end marker",
-			Format: `[cyan]═══ MLOG_MULTI_REC_END Format ═══[white]
+			Format: `[cyan]═══ MLOG_MULTI_REC_END Format within 512-byte Block ═══[white]
 
-[yellow]Header:[white]
-• Type:     1 byte  (0x1F)
-• Length:   0 (no body)
+[yellow]512-Byte Block Structure:[white]
+[cyan]Block Header (12 bytes):[white]
+  Offset 0-3:   Block Number (4 bytes)
+  Offset 4-5:   Data Length (2 bytes)
+  Offset 6-7:   First Record Group Offset (2 bytes)
+  Offset 8-11:  Epoch Number (4 bytes)
 
-[green]Purpose:[white]
+[cyan]Record Data Area (496 bytes available):[white]
+[yellow]MLOG_MULTI_REC_END Record Format:[white]
+  Byte 0:       Type = 0x1F (1 byte)
+  Byte 1:       Length = 0x00 (1 byte) - no body data
+
+[cyan]Block Trailer (4 bytes):[white]
+  Offset 508-511: Checksum (4 bytes)
+
+[green]Record Size: 2 bytes (minimal)[white]
+[green]Block Utilization: ~0.4% of data area[white]
+[yellow]Purpose:[white]
 • Marks end of atomic operation group
 • All records since group start must succeed
 • Used for multi-statement transactions
+• Critical for crash recovery consistency
 
-[yellow]Group Structure:[white]
-Record 1 (group start)
-Record 2  
-Record 3
-...
-MLOG_MULTI_REC_END (this record)
-
-[gray]Ensures atomicity during recovery[white]`,
+[yellow]Multi-Record Group in Block:[white]
+  Record 1: [Operation start] (e.g., MLOG_REC_INSERT)
+  Record 2: [Related operation] (e.g., MLOG_REC_UPDATE)  
+  Record 3: [Another operation]
+  ...
+  Record N: MLOG_MULTI_REC_END (this record)
+  
+[gray]Remaining space: 494 bytes available for other records[white]
+[gray]Often packed with other operations in same block[white]`,
 		},
 
 		// File operations
@@ -1677,31 +1763,50 @@ MLOG_MULTI_REC_END (this record)
 		62: {
 			ID: 62, Name: "MLOG_TABLE_DYNAMIC_META", Category: "Metadata Operations",
 			Description: "Dynamic table metadata",
-			Format: `[cyan]═══ MLOG_TABLE_DYNAMIC_META Format ═══[white]
+			Format: `[cyan]═══ MLOG_TABLE_DYNAMIC_META Format within 512-byte Block ═══[white]
 
-[yellow]Header:[white]
-• Type:     1 byte  (0x3E)
-• Length:   Variable
+[yellow]512-Byte Block Structure:[white]
+[cyan]Block Header (12 bytes):[white]
+  Offset 0-3:   Block Number (4 bytes)
+  Offset 4-5:   Data Length (2 bytes)
+  Offset 6-7:   First Record Group Offset (2 bytes)
+  Offset 8-11:  Epoch Number (4 bytes)
 
-[yellow]Body:[white]
-• Table ID:      8 bytes
-• Version:       8 bytes  
-• Metadata Type: 1 byte
-• Metadata Len:  Compressed
-• Metadata:      Variable
+[cyan]Record Data Area (496 bytes available):[white]
+[yellow]MLOG_TABLE_DYNAMIC_META Record Format:[white]
+  Byte 0:       Type = 0x3E (1 byte)
+  Byte 1-5:     Length (compressed 1-5 bytes)
+  Byte 6-13:    Table ID (8 bytes)
+  Byte 14-21:   Version (8 bytes)
+  Byte 22:      Metadata Type Flags (1 byte)
+  Byte 23-27:   Metadata Length (compressed 1-5 bytes)
+  Byte 28-N:    Metadata Content (variable)
 
-[yellow]Metadata Types:[white]
-• 0x01: Corrupted flag
-• 0x02: Auto-increment value
-• 0x04: Statistics version
-• 0x08: Instant column info
+[yellow]Metadata Type Flags:[white]
+  Bit 0 (0x01): Corrupted flag
+  Bit 1 (0x02): Auto-increment value present
+  Bit 2 (0x04): Statistics version present
+  Bit 3 (0x08): Instant column info present
+  Bits 4-7:     Reserved
 
-[green]Instant ADD COLUMN Support:[white]
-• Column count
-• Default values
-• Column positions
+[yellow]Instant Column Metadata Structure:[white]
+  - Original Column Count (compressed 1-5 bytes)
+  - Added Column Count (compressed 1-5 bytes)  
+  - Default Value Length (compressed 1-5 bytes)
+  - Default Values (variable per added column)
+  - Column Position Map (variable)
 
-[gray]Enables online DDL operations[white]`,
+[cyan]Block Trailer (4 bytes):[white]
+  Offset 508-511: Checksum (4 bytes)
+
+[green]Typical Record Size: 30-150 bytes[white]
+[green]Block Utilization: ~6-30% of data area[white]
+[yellow]Purpose:[white]
+• Enables online DDL operations
+• Instant ADD COLUMN without table rebuild
+• Statistics and auto-increment tracking
+
+[gray]Critical for instant schema changes in MySQL 8.0+[white]`,
 		},
 	}
 }
