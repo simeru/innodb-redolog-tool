@@ -2,12 +2,16 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/csv"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -19,6 +23,8 @@ var (
 	filename = flag.String("file", "", "InnoDB redo log file to analyze")
 	verbose  = flag.Bool("v", false, "Verbose output")
 	testMode = flag.Bool("test", false, "Test hex parsing without TUI")
+	exportFormat = flag.String("export", "", "Export format: json, csv (skips TUI)")
+	exportFile = flag.String("output", "", "Export output file (default: stdout)")
 )
 
 type RedoLogApp struct {
@@ -388,6 +394,16 @@ func main() {
 			fmt.Printf("\n❌ No VARCHAR strings found at all\n")
 		}
 		
+		return
+	}
+
+	// Check if export mode is requested
+	if *exportFormat != "" {
+		err := exportRecords(records, header, *exportFormat, *exportFile)
+		if err != nil {
+			fmt.Printf("Export error: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -1791,4 +1807,94 @@ func (app *RedoLogApp) updateSearchStatus() {
 	if !strings.Contains(currentFooter, "Search:") {
 		app.footer.SetText(currentFooter + searchStatus)
 	}
+}
+
+// Export functionality
+func exportRecords(records []*types.LogRecord, header *types.RedoLogHeader, format, outputFile string) error {
+	var output io.Writer = os.Stdout
+	
+	if outputFile != "" {
+		file, err := os.Create(outputFile)
+		if err != nil {
+			return fmt.Errorf("failed to create output file: %v", err)
+		}
+		defer file.Close()
+		output = file
+	}
+	
+	switch strings.ToLower(format) {
+	case "json":
+		return exportJSON(output, records, header)
+	case "csv":
+		return exportCSV(output, records, header)
+	default:
+		return fmt.Errorf("unsupported export format: %s (supported: json, csv)", format)
+	}
+}
+
+func exportJSON(w io.Writer, records []*types.LogRecord, header *types.RedoLogHeader) error {
+	data := struct {
+		Header  *types.RedoLogHeader `json:"header"`
+		Records []*types.LogRecord   `json:"records"`
+		Stats   map[string]interface{} `json:"stats"`
+	}{
+		Header:  header,
+		Records: records,
+		Stats: map[string]interface{}{
+			"total_records": len(records),
+			"export_timestamp": time.Now().Format(time.RFC3339),
+			"format_version": header.Format,
+		},
+	}
+	
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(data)
+}
+
+func exportCSV(w io.Writer, records []*types.LogRecord, header *types.RedoLogHeader) error {
+	writer := csv.NewWriter(w)
+	defer writer.Flush()
+	
+	// Write header
+	headers := []string{
+		"Record_Number", "LSN", "Type", "Type_ID", "Length", 
+		"Space_ID", "Page_No", "Table_ID", "Group", "Data_Preview", "Data_Length",
+	}
+	if err := writer.Write(headers); err != nil {
+		return err
+	}
+	
+	// Write records
+	for i, record := range records {
+		// Limit data preview to first 100 characters
+		dataPreview := string(record.Data)
+		if len(dataPreview) > 100 {
+			dataPreview = dataPreview[:100] + "..."
+		}
+		// Replace newlines and control characters for CSV
+		dataPreview = strings.ReplaceAll(dataPreview, "\n", "\\n")
+		dataPreview = strings.ReplaceAll(dataPreview, "\r", "\\r")
+		dataPreview = strings.ReplaceAll(dataPreview, "\"", "\"\"")
+		
+		row := []string{
+			fmt.Sprintf("%d", i+1),
+			fmt.Sprintf("%d", record.LSN),
+			record.Type.String(),
+			fmt.Sprintf("%d", uint8(record.Type)),
+			fmt.Sprintf("%d", record.Length),
+			fmt.Sprintf("%d", record.SpaceID),
+			fmt.Sprintf("%d", record.PageNo),
+			fmt.Sprintf("%d", record.TableID),
+			fmt.Sprintf("%d", record.MultiRecordGroup),
+			dataPreview,
+			fmt.Sprintf("%d", len(record.Data)),
+		}
+		
+		if err := writer.Write(row); err != nil {
+			return err
+		}
+	}
+	
+	return nil
 }
