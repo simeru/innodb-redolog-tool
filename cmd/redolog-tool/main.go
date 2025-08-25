@@ -224,46 +224,163 @@ func main() {
 
 	// Test mode: parse records and show cross-block reads with strings
 	if *testMode {
-		fmt.Printf("Test mode: Searching for records with cross-block reads and VARCHAR strings\n\n")
+		fmt.Printf("Test mode: Searching for sakila-data.sql VARCHAR content in redo log\n\n")
 		
-		foundVarcharRecords := 0
-		foundCrossBlockRecords := 0
+		// Expected unique sakila data strings from sakila-data.sql
+		sakilaStrings := []string{
+			"sakila", "SAKILA", // Database name
+			"PENELOPE", "GUINESS", "WAHLBERG", "LOLLOBRIGIDA", 
+			"ACADEMY DINOSAUR", "AFRICAN EGG", "AGENT TRUMAN", 
+			"AIRPLANE SIERRA", "ALABAMA DEVIL", "ALADDIN CALENDAR",
+			"Epic Drama of a Feminist", "Astounding Documentary", 
+			"Fanciful Documentary", "Fast-Paced Documentary",
+			"Canadian Rockies", "Mad Scientist", "Battle a Teacher",
+			"actor", "film", "rental", "customer", "payment", // Table names
+		}
+		
+		fmt.Printf("Looking for these sakila-data.sql VARCHAR strings:\n")
+		for i, str := range sakilaStrings {
+			fmt.Printf("  %d. '%s'\n", i+1, str)
+		}
+		fmt.Printf("\n" + strings.Repeat("-", 60) + "\n")
+		
+		foundSakilaCount := 0
+		foundSystemCount := 0
+		foundAnyStrings := 0
 		
 		for i, record := range records {
-			// Look for MLOG_REC_INSERT_8027 records with actual data
-			if record.Type == 9 { // MLOG_REC_INSERT_8027
-				dataStr := string(record.Data)
+			// Search both ASCII data and raw binary data
+			recordData := string(record.Data)
+			rawData := record.Data // Raw binary data
+			recordHasSakila := false
+			recordHasSystem := false
+			
+			// Check for sakila strings in both ASCII and binary data
+			for _, sakilaStr := range sakilaStrings {
+				foundInAscii := strings.Contains(recordData, sakilaStr)
+				foundInBinary := strings.Contains(string(rawData), sakilaStr)
 				
-				// Check if this record has cross-block read success
-				if strings.Contains(dataStr, "cross_block_read=success") {
-					foundCrossBlockRecords++
-					fmt.Printf("Record %d: MLOG_REC_INSERT_8027 with cross-block read success\n", i+1)
-					fmt.Printf("  TableID: %d\n", record.TableID)
-					
-					// Check if it contains string data
-					if strings.Contains(dataStr, "found_strings=") {
-						foundVarcharRecords++
-						fmt.Printf("  *** Contains VARCHAR strings! ***\n")
+				if foundInAscii || foundInBinary {
+					if !recordHasSakila {
+						dataSource := "ASCII"
+						if foundInBinary && !foundInAscii {
+							dataSource = "BINARY"
+						} else if foundInBinary && foundInAscii {
+							dataSource = "ASCII+BINARY"
+						}
+						
+						fmt.Printf("🎯 Record %d: %s - FOUND SAKILA DATA! [%s]\n", i+1, record.Type.String(), dataSource)
+						fmt.Printf("   LSN: %d, TableID: %d, SpaceID: %d\n", record.LSN, record.TableID, record.SpaceID)
+						recordHasSakila = true
+						foundSakilaCount++
 					}
 					
-					if strings.Contains(dataStr, "data_hex=") {
-						fmt.Printf("  Data: %s\n", record.Data)
+					// Show context around the found string (prefer binary if found there)
+					searchData := recordData
+					if foundInBinary {
+						searchData = string(rawData)
+					}
+					
+					index := strings.Index(searchData, sakilaStr)
+					start := index - 30
+					end := index + len(sakilaStr) + 30
+					if start < 0 { start = 0 }
+					if end > len(searchData) { end = len(searchData) }
+					
+					context := searchData[start:end]
+					// Replace non-printable characters for display
+					displayContext := strings.Map(func(r rune) rune {
+						if r >= 32 && r < 127 {
+							return r
+						}
+						return '.'
+					}, context)
+					
+					fmt.Printf("   Found: '%s' in context: ...%s...\n", sakilaStr, displayContext)
+					
+					// Show hex dump of the area around the found string
+					fmt.Printf("   Hex context: ")
+					hexStart := start
+					hexEnd := end
+					if hexEnd-hexStart > 60 { // Limit hex display
+						hexEnd = hexStart + 60
+					}
+					for j := hexStart; j < hexEnd && j < len(rawData); j++ {
+						fmt.Printf("%02x ", rawData[j])
+					}
+					fmt.Printf("\n")
+					
+					// Show full record details for sakila records
+					fmt.Printf("   Full record details:\n")
+					fmt.Printf("     Type: %s (ID: %d)\n", record.Type.String(), uint8(record.Type))
+					fmt.Printf("     Length: %d bytes\n", record.Length)
+					if record.SpaceID != 0 {
+						fmt.Printf("     SpaceID: %d\n", record.SpaceID)
+					}
+					if record.PageNo != 0 {
+						fmt.Printf("     PageNo: %d\n", record.PageNo)
+					}
+					if record.TableID != 0 {
+						fmt.Printf("     TableID: %d\n", record.TableID)
+					}
+					fmt.Printf("     Group: %d\n", record.MultiRecordGroup)
+					
+					// Show more data context for sakila records (first 200 bytes)
+					dataLen := len(rawData)
+					if dataLen > 200 {
+						dataLen = 200
+					}
+					fmt.Printf("   Raw data (first %d bytes): ", dataLen)
+					for k := 0; k < dataLen; k++ {
+						if k%16 == 0 {
+							fmt.Printf("\n     ")
+						}
+						fmt.Printf("%02x ", rawData[k])
 					}
 					fmt.Printf("\n")
 				}
 			}
+			
+			// Check for system strings (for comparison)
+			systemStrings := []string{"statement_analysis", "host_summary", "schema_unused", "sys_config", "setup_actors"}
+			for _, sysStr := range systemStrings {
+				foundSysAscii := strings.Contains(recordData, sysStr)
+				foundSysBinary := strings.Contains(string(rawData), sysStr)
+				
+				if (foundSysAscii || foundSysBinary) && !recordHasSystem {
+					recordHasSystem = true
+					foundSystemCount++
+					// Also show system string details
+					dataSource := "ASCII"
+					if foundSysBinary && !foundSysAscii {
+						dataSource = "BINARY"
+					}
+					fmt.Printf("📊 Record %d: %s - Found system string '%s' [%s]\n", i+1, record.Type.String(), sysStr, dataSource)
+					break
+				}
+			}
+			
+			// Check for any VARCHAR strings found
+			if strings.Contains(recordData, "found_strings=") {
+				foundAnyStrings++
+			}
 		}
 		
-		fmt.Printf("Summary:\n")
-		fmt.Printf("- Records with cross-block read success: %d\n", foundCrossBlockRecords)
-		fmt.Printf("- Records with VARCHAR strings: %d\n", foundVarcharRecords)
+		fmt.Printf("\n" + strings.Repeat("=", 60) + "\n")
+		fmt.Printf("SEARCH RESULTS:\n")
+		fmt.Printf("- Records with sakila data: %d\n", foundSakilaCount)
+		fmt.Printf("- Records with system data: %d\n", foundSystemCount)
+		fmt.Printf("- Records with any VARCHAR strings: %d\n", foundAnyStrings)
 		
-		if foundVarcharRecords > 0 {
-			fmt.Printf("\n✅ Success! Found VARCHAR strings in sakila_redolog.log records!\n")
-		} else if foundCrossBlockRecords > 0 {
-			fmt.Printf("\n⚠️  Found cross-block reads but no VARCHAR strings yet. Need to improve string extraction.\n")
+		if foundSakilaCount > 0 {
+			fmt.Printf("\n✅ SUCCESS! Found actual sakila-data.sql VARCHAR content!\n")
+		} else if foundAnyStrings > 0 {
+			fmt.Printf("\n⚠️  Found VARCHAR strings, but they are system DB data, not sakila data\n")
+			fmt.Printf("   This suggests:\n")
+			fmt.Printf("   - The redo log was captured during MySQL system operations\n")
+			fmt.Printf("   - Sakila data inserts may be in a different redo log file/timeframe\n")
 		} else {
-			fmt.Printf("\n❌ No cross-block reads found. The boundary issue may still exist.\n")
+			fmt.Printf("\n❌ No VARCHAR strings found at all\n")
 		}
 		
 		return
@@ -1214,6 +1331,13 @@ func loadRedoLogData(filename string) ([]*types.LogRecord, *types.RedoLogHeader,
 		record, err := readerInstance.ReadRecord()
 		if err != nil {
 			if readerInstance.IsEOF() {
+				break
+			}
+			// Check if this is a normal end-of-log condition
+			if strings.Contains(err.Error(), "end of valid log data") {
+				if *verbose {
+					fmt.Printf("Reached end of log data at record %d\n", recordCount+1)
+				}
 				break
 			}
 			return nil, nil, fmt.Errorf("failed to read record %d: %w", recordCount+1, err)
