@@ -952,18 +952,48 @@ func (r *MySQLRedoLogReader) parseValidRecord(recordType uint8) (*types.LogRecor
 	
 	if remainingData >= 4 {
 		switch recordType {
-		case 1, 2, 4, 8: // MLOG_1BYTE, 2BYTES, 4BYTES, 8BYTES
-			// Format from mlog_parse_nbytes: offset(2) + compressed_value
+		case 1: // MLOG_1BYTE
+			// Format: offset(2) + value(1)
+			if remainingData >= 3 && r.dataOffset+3 <= len(r.blockData) {
+				offset := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
+				r.dataOffset += 2
+				value := r.blockData[r.dataOffset]
+				r.dataOffset += 1
+				recordLength += 3
+				recordData = []byte(fmt.Sprintf("offset=%d value=0x%02x", offset, value))
+			}
+			
+		case 2: // MLOG_2BYTES
+			// Format: offset(2) + value(2)
+			if remainingData >= 4 && r.dataOffset+4 <= len(r.blockData) {
+				offset := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
+				r.dataOffset += 2
+				value := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
+				r.dataOffset += 2
+				recordLength += 4
+				recordData = []byte(fmt.Sprintf("offset=%d value=0x%04x", offset, value))
+			}
+			
+		case 4: // MLOG_4BYTES
+			// Format: offset(2) + value(4)
 			if remainingData >= 6 && r.dataOffset+6 <= len(r.blockData) {
 				offset := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
 				r.dataOffset += 2
-				
-				// Read the value (simplified - real MySQL uses compressed integers)
-				valueBytes := binary.LittleEndian.Uint32(r.blockData[r.dataOffset:r.dataOffset+4])
+				value := binary.LittleEndian.Uint32(r.blockData[r.dataOffset:r.dataOffset+4])
 				r.dataOffset += 4
 				recordLength += 6
-				
-				recordData = []byte(fmt.Sprintf("offset=%d value=0x%x", offset, valueBytes))
+				recordData = []byte(fmt.Sprintf("offset=%d value=0x%08x", offset, value))
+			}
+			
+		case 8: // MLOG_8BYTES
+			// Format: offset(2) + value(8)
+			if remainingData >= 10 && r.dataOffset+10 <= len(r.blockData) {
+				offset := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
+				r.dataOffset += 2
+				value := binary.LittleEndian.Uint64(r.blockData[r.dataOffset:r.dataOffset+8])
+				r.dataOffset += 8
+				recordLength += 10
+				recordData = []byte(fmt.Sprintf("offset=%d value=0x%016x", offset, value))
 			}
 			
 		case 62: // MLOG_TABLE_DYNAMIC_META - contains actual Table ID
@@ -1061,55 +1091,32 @@ func (r *MySQLRedoLogReader) parseValidRecord(recordType uint8) (*types.LogRecor
 			}
 			
 		default:
-			// For other record types, try mlog_parse_string format: offset(2) + len(2) + data
-			if remainingData >= 4 && r.dataOffset+4 <= len(r.blockData) {
-				offset := binary.LittleEndian.Uint16(r.blockData[r.dataOffset:r.dataOffset+2])
-				length := binary.LittleEndian.Uint16(r.blockData[r.dataOffset+2:r.dataOffset+4])
-				r.dataOffset += 4
-				recordLength += 4
+			// For unknown record types, read available data without assuming structure
+			// Don't assume offset+length format since many MLOG types have different structures
+			maxRead := remainingData
+			if maxRead > 32 { // Limit to reasonable size for unknown types
+				maxRead = 32
+			}
+			if maxRead > 0 && r.dataOffset+maxRead <= len(r.blockData) {
+				someData := r.blockData[r.dataOffset:r.dataOffset+maxRead]
+				r.dataOffset += maxRead
+				recordLength += uint32(maxRead)
 				
-				// Try to read string data if length is reasonable
-				remainingAfterHeader := len(r.blockData) - r.dataOffset
-				if length > 0 && int(length) <= remainingAfterHeader && length <= 256 && r.dataOffset+int(length) <= len(r.blockData) {
-					stringData := r.blockData[r.dataOffset:r.dataOffset+int(length)]
-					r.dataOffset += int(length)
-					recordLength += uint32(length)
-					
-					readableStr := extractReadableStrings(stringData)
-					if len(readableStr) > 0 {
-						recordData = []byte(fmt.Sprintf("offset=%d len=%d str='%s'", offset, length, readableStr))
-					} else {
-						recordData = []byte(fmt.Sprintf("offset=%d len=%d hex=%x", offset, length, stringData))
-					}
+				// Try to extract readable strings from the data
+				readableStr := extractReadableStrings(someData)
+				if len(readableStr) > 0 {
+					recordData = []byte(fmt.Sprintf("type_%d_data='%s'", recordType, readableStr))
 				} else {
-					// Maybe it's a different format, try to read what we can
-					maxRead := remainingAfterHeader
-					if maxRead > 64 {
-						maxRead = 64
-					}
-					if maxRead > 0 && r.dataOffset+maxRead <= len(r.blockData) {
-						someData := r.blockData[r.dataOffset:r.dataOffset+maxRead]
-						r.dataOffset += maxRead
-						recordLength += uint32(maxRead)
-						
-						readableStr := extractReadableStrings(someData)
-						if len(readableStr) > 0 {
-							recordData = []byte(fmt.Sprintf("offset=%d badlen=%d data=%s", offset, length, readableStr))
-						} else {
-							recordData = []byte(fmt.Sprintf("offset=%d badlen=%d hex=%x", offset, length, someData))
-						}
-					} else {
-						recordData = []byte(fmt.Sprintf("offset=%d len=%d", offset, length))
-					}
+					recordData = []byte(fmt.Sprintf("type_%d_hex=%x", recordType, someData))
 				}
 			} else {
-				// Not enough data for structured parsing
-				recordData = []byte{recordType}
+				// No data available
+				recordData = []byte(fmt.Sprintf("type_%d_empty", recordType))
 			}
 		}
 	} else {
-		// Not enough data for structured parsing
-		recordData = []byte{recordType}
+		// Not enough data for any structured parsing
+		recordData = []byte(fmt.Sprintf("type_%d_insufficient_data", recordType))
 	}
 
 	record := &types.LogRecord{

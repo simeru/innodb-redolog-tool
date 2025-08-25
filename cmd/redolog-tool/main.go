@@ -139,7 +139,7 @@ func main() {
 		// Show footer simulation
 		fmt.Printf("Footer display simulation:\n")
 		// Simulate what would appear in the footer
-		showTableID0 := false // Default: filter ON
+		showTableID0 := true // Default: show all records
 		filteredRecords := make([]*types.LogRecord, 0)
 		for _, record := range records {
 			if !showTableID0 && record.TableID == 0 && record.SpaceID == 0 {
@@ -419,7 +419,7 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 	app := &RedoLogApp{
 		records: records,
 		header:  header,
-		showTableID0: false, // Default: hide Table ID 0 records
+		showTableID0: true, // Default: show all records including Table ID 0
 		operationFilter: "all", // Default: show all operation types
 	}
 
@@ -559,10 +559,6 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 			app.app.Stop()
 			return nil
 		}
-		if event.Rune() == 's' || event.Rune() == 'S' {
-			app.toggleTableID0Filter()
-			return nil
-		}
 		if event.Rune() == 'i' || event.Rune() == 'I' {
 			app.toggleOperationFilter("insert")
 			return nil
@@ -608,10 +604,6 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 		// Check for character keys
 		if event.Rune() == 'q' || event.Rune() == 'Q' {
 			app.app.Stop()
-			return nil
-		}
-		if event.Rune() == 's' || event.Rune() == 'S' {
-			app.toggleTableID0Filter()
 			return nil
 		}
 		if event.Rune() == 'i' || event.Rune() == 'I' {
@@ -1584,7 +1576,7 @@ func (app *RedoLogApp) updateFooter() {
 		opFilterText = "[white]ALL"
 	}
 
-	footerText := fmt.Sprintf(`[yellow]Keys: [bold]'s'[reset][yellow]=Table ID 0, [bold]'i'[reset][yellow]=INSERT, [bold]'u'[reset][yellow]=UPDATE, [bold]'d'[reset][yellow]=DELETE, [bold]Tab[reset][yellow]=Switch Panes [white]| Filters: Table ID 0=%s%s[white] Op=%s[white] | Records: [cyan]%d[white]/[blue]%d`,
+	footerText := fmt.Sprintf(`[yellow]Keys: [bold]'i'[reset][yellow]=INSERT, [bold]'u'[reset][yellow]=UPDATE, [bold]'d'[reset][yellow]=DELETE, [bold]Tab[reset][yellow]=Switch Panes [white]| Filters: Table ID 0=%s%s[white] Op=%s[white] | Records: [cyan]%d[white]/[blue]%d`,
 		filterColor, filterStatus, opFilterText, len(app.filteredRecords), len(app.records))
 
 	app.footer.SetText(footerText)
