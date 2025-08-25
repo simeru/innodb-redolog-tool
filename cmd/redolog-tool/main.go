@@ -26,12 +26,17 @@ type RedoLogApp struct {
 	recordList    *tview.List
 	detailsText   *tview.TextView
 	footer        *tview.TextView
+	searchInput   *tview.InputField
+	searchModal   *tview.Modal
 	records       []*types.LogRecord
 	filteredRecords []*types.LogRecord
 	recordIndices []int // Maps filtered index to original index
 	header        *types.RedoLogHeader
 	showTableID0  bool // Toggle for showing Table ID 0 records
 	operationFilter string // "all", "insert", "update", "delete"
+	searchTerm    string // Current search term
+	searchMatches []int  // Indices of records matching current search
+	currentSearchIndex int // Current position in search matches
 }
 
 func main() {
@@ -605,6 +610,18 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 			app.toggleOperationFilter("delete")
 			return nil
 		}
+		if event.Rune() == '/' {
+			app.showSearchModal()
+			return nil
+		}
+		if event.Rune() == 'n' {
+			app.nextSearchResult()
+			return nil
+		}
+		if event.Rune() == 'N' {
+			app.prevSearchResult()
+			return nil
+		}
 		// For other keys (including j/k for vim-style scrolling), pass through
 		return event
 	})
@@ -618,6 +635,9 @@ func NewRedoLogApp(records []*types.LogRecord, header *types.RedoLogHeader) *Red
 		app.recordList.SetCurrentItem(0)
 	}
 
+	// Initialize search components
+	app.initializeSearch()
+	
 	return app
 }
 
@@ -640,6 +660,9 @@ Table ID 0 Filter: %s
 Tab: Switch panes  
 Enter: Focus details pane
 s: Toggle Table ID 0 filter
+/: Open search modal
+n: Next search result
+N: Previous search result
 Esc/q: Exit
 
 [yellow]Footer Status:[white] %s
@@ -1600,5 +1623,172 @@ func (app *RedoLogApp) toggleOperationFilter(operation string) {
 	if len(app.filteredRecords) > 0 {
 		app.recordList.SetCurrentItem(0)
 		app.showRecordDetails(0)
+	}
+}
+// Search functionality methods
+func (app *RedoLogApp) initializeSearch() {
+	// Create search input field
+	app.searchInput = tview.NewInputField()
+	app.searchInput.SetLabel("Search: ")
+	app.searchInput.SetFieldWidth(50)
+	app.searchInput.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEnter {
+			searchTerm := app.searchInput.GetText()
+			app.performSearch(searchTerm)
+		} else if key == tcell.KeyEscape {
+			app.hideSearchModal()
+		}
+	})
+	
+	// Create search modal
+	app.searchModal = tview.NewModal()
+	app.searchModal.SetText("Search in record data (VARCHAR strings, hex data, LSN, etc.)")
+	app.searchModal.AddButtons([]string{"Search", "Cancel"})
+	app.searchModal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+		if buttonLabel == "Search" {
+			searchTerm := app.searchInput.GetText()
+			app.performSearch(searchTerm)
+		}
+		app.hideSearchModal()
+	})
+}
+
+func (app *RedoLogApp) showSearchModal() {
+	// Clear previous search term
+	app.searchInput.SetText("")
+	
+	// Create a flex container for the input
+	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+	flex.AddItem(app.searchInput, 1, 0, true)
+	flex.AddItem(app.searchModal, 0, 1, false)
+	
+	// Show the modal with input field
+	app.app.SetRoot(flex, true)
+	app.app.SetFocus(app.searchInput)
+}
+
+func (app *RedoLogApp) hideSearchModal() {
+	// Return to main layout
+	mainLayout := tview.NewFlex()
+	
+	// Add left pane (record list)
+	mainLayout.AddItem(app.recordList, 0, 1, true)
+	
+	// Add right pane (details)
+	rightPane := tview.NewFlex().SetDirection(tview.FlexRow)
+	rightPane.AddItem(app.detailsText, 0, 1, false)
+	rightPane.AddItem(app.footer, 3, 0, false)
+	
+	mainLayout.AddItem(rightPane, 0, 2, false)
+	
+	app.app.SetRoot(mainLayout, true)
+	app.app.SetFocus(app.recordList)
+}
+
+func (app *RedoLogApp) performSearch(searchTerm string) {
+	if searchTerm == "" {
+		return
+	}
+	
+	app.searchTerm = searchTerm
+	app.searchMatches = []int{}
+	app.currentSearchIndex = 0
+	
+	// Search through all records (not just filtered ones)
+	for i, record := range app.records {
+		// Search in multiple fields
+		recordData := string(record.Data)
+		lsnStr := fmt.Sprintf("%d", record.LSN)
+		typeStr := record.Type.String()
+		
+		// Case-insensitive search
+		searchLower := strings.ToLower(searchTerm)
+		
+		if strings.Contains(strings.ToLower(recordData), searchLower) ||
+		   strings.Contains(strings.ToLower(lsnStr), searchLower) ||
+		   strings.Contains(strings.ToLower(typeStr), searchLower) ||
+		   strings.Contains(strings.ToLower(fmt.Sprintf("%d", record.TableID)), searchLower) ||
+		   strings.Contains(strings.ToLower(fmt.Sprintf("%d", record.SpaceID)), searchLower) {
+			app.searchMatches = append(app.searchMatches, i)
+		}
+	}
+	
+	// Update footer with search results
+	app.updateSearchStatus()
+	
+	// Navigate to first match if any
+	if len(app.searchMatches) > 0 {
+		app.goToSearchResult(0)
+	}
+}
+
+func (app *RedoLogApp) nextSearchResult() {
+	if len(app.searchMatches) == 0 {
+		return
+	}
+	
+	app.currentSearchIndex = (app.currentSearchIndex + 1) % len(app.searchMatches)
+	app.goToSearchResult(app.currentSearchIndex)
+}
+
+func (app *RedoLogApp) prevSearchResult() {
+	if len(app.searchMatches) == 0 {
+		return
+	}
+	
+	app.currentSearchIndex = (app.currentSearchIndex - 1 + len(app.searchMatches)) % len(app.searchMatches)
+	app.goToSearchResult(app.currentSearchIndex)
+}
+
+func (app *RedoLogApp) goToSearchResult(matchIndex int) {
+	if matchIndex >= len(app.searchMatches) {
+		return
+	}
+	
+	recordIndex := app.searchMatches[matchIndex]
+	
+	// Find this record in the filtered records
+	for filteredIndex, originalIndex := range app.recordIndices {
+		if originalIndex == recordIndex {
+			// Found the record in filtered list
+			app.recordList.SetCurrentItem(filteredIndex)
+			app.showRecordDetails(filteredIndex)
+			app.updateSearchStatus()
+			return
+		}
+	}
+	
+	// Record not in current filtered view - temporarily show all to navigate to it
+	app.showTableID0 = true
+	app.operationFilter = "all"
+	app.updateFilteredRecords()
+	app.rebuildRecordList()
+	
+	// Try again to find in new filtered list
+	for filteredIndex, originalIndex := range app.recordIndices {
+		if originalIndex == recordIndex {
+			app.recordList.SetCurrentItem(filteredIndex)
+			app.showRecordDetails(filteredIndex)
+			app.updateSearchStatus()
+			return
+		}
+	}
+}
+
+func (app *RedoLogApp) updateSearchStatus() {
+	if app.searchTerm == "" || len(app.searchMatches) == 0 {
+		return
+	}
+	
+	// Add search status to footer
+	currentMatch := app.currentSearchIndex + 1
+	totalMatches := len(app.searchMatches)
+	
+	searchStatus := fmt.Sprintf(" | Search: '%s' (%d/%d matches)", app.searchTerm, currentMatch, totalMatches)
+	
+	// Get current footer text and append search status
+	currentFooter := app.footer.GetText(false)
+	if !strings.Contains(currentFooter, "Search:") {
+		app.footer.SetText(currentFooter + searchStatus)
 	}
 }
