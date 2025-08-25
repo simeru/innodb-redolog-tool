@@ -34,8 +34,10 @@ type RedoLogApp struct {
 	footer        *tview.TextView
 	searchInput   *tview.InputField
 	searchModal   *tview.Modal
-	referenceView *tview.TextView
+	referenceView *tview.List  // Changed to List for clickable items
 	referenceModal *tview.Flex
+	typeDetailView *tview.TextView
+	typeDetailModal *tview.Flex
 	records       []*types.LogRecord
 	filteredRecords []*types.LogRecord
 	recordIndices []int // Maps filtered index to original index
@@ -45,6 +47,15 @@ type RedoLogApp struct {
 	searchTerm    string // Current search term
 	searchMatches []int  // Indices of records matching current search
 	currentSearchIndex int // Current position in search matches
+}
+
+// TypeInfo holds information about each redo log type
+type TypeInfo struct {
+	ID          uint8
+	Name        string
+	Category    string
+	Description string
+	Format      string // Detailed format information
 }
 
 func main() {
@@ -1321,19 +1332,442 @@ func (app *RedoLogApp) extractFieldsData(data string) string {
 	return strings.Join(info, "\n")
 }
 
+// getTypeInfoMap returns a map of all redo log types with their detailed information
+func getTypeInfoMap() map[uint8]*TypeInfo {
+	return map[uint8]*TypeInfo{
+		// Basic byte operations
+		1: {
+			ID: 1, Name: "MLOG_1BYTE", Category: "Basic Byte Operations",
+			Description: "Write 1 byte to a page",
+			Format: `[cyan]═══ MLOG_1BYTE Format ═══[white]
+
+[yellow]Header (Type-Length-SpaceID-PageNo):[white]
+• Type:     1 byte  (0x01)
+• Length:   Compressed (1-5 bytes)
+• Space ID: Compressed (1-5 bytes)
+• Page No:  Compressed (1-5 bytes)
+
+[yellow]Body:[white]
+• Offset:   2 bytes (Page offset where to write)
+• Value:    1 byte  (Value to write)
+
+[green]Total Size: ~7-18 bytes (depending on compression)[white]
+[gray]Used for small atomic updates to page headers or flags[white]`,
+		},
+		2: {
+			ID: 2, Name: "MLOG_2BYTES", Category: "Basic Byte Operations",
+			Description: "Write 2 bytes to a page",
+			Format: `[cyan]═══ MLOG_2BYTES Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x02)
+• Length:   Compressed (1-5 bytes)
+• Space ID: Compressed (1-5 bytes)
+• Page No:  Compressed (1-5 bytes)
+
+[yellow]Body:[white]
+• Offset:   2 bytes (Page offset)
+• Value:    2 bytes (Value to write)
+
+[green]Total Size: ~8-19 bytes[white]
+[gray]Used for updating 16-bit values like counts or small offsets[white]`,
+		},
+		4: {
+			ID: 4, Name: "MLOG_4BYTES", Category: "Basic Byte Operations",
+			Description: "Write 4 bytes to a page",
+			Format: `[cyan]═══ MLOG_4BYTES Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x04)
+• Length:   Compressed (1-5 bytes)
+• Space ID: Compressed (1-5 bytes)
+• Page No:  Compressed (1-5 bytes)
+
+[yellow]Body:[white]
+• Offset:   2 bytes (Page offset)
+• Value:    4 bytes (Value to write)
+
+[green]Total Size: ~10-21 bytes[white]
+[gray]Used for 32-bit values like page numbers, checksums[white]`,
+		},
+		8: {
+			ID: 8, Name: "MLOG_8BYTES", Category: "Basic Byte Operations",
+			Description: "Write 8 bytes to a page",
+			Format: `[cyan]═══ MLOG_8BYTES Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x08)
+• Length:   Compressed (1-5 bytes)
+• Space ID: Compressed (1-5 bytes)
+• Page No:  Compressed (1-5 bytes)
+
+[yellow]Body:[white]
+• Offset:   2 bytes (Page offset)
+• Value:    8 bytes (Value to write)
+
+[green]Total Size: ~14-25 bytes[white]
+[gray]Used for 64-bit values like LSN, transaction IDs[white]`,
+		},
+
+		// Record operations
+		9: {
+			ID: 9, Name: "MLOG_REC_INSERT_8027", Category: "Record Operations (Old Format)",
+			Description: "Insert a record (old format)",
+			Format: `[cyan]═══ MLOG_REC_INSERT_8027 Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x09)
+• Space ID: Compressed (1-5 bytes)
+• Page No:  Compressed (1-5 bytes)
+
+[yellow]Body:[white]
+• Cursor Position:  2 bytes
+• Record End Offset: 2 bytes  
+• Info & Status:    1 byte
+• Origin Offset:    Variable (compressed)
+• Mismatch Index:   Variable (compressed)
+• Record Data:      Variable length
+
+[green]Structure Details:[white]
+• Cursor points to location for insert
+• Record data includes all column values
+• Info bits contain delete mark and min rec mark
+
+[gray]Legacy format from MySQL 8.0.27 and earlier[white]`,
+		},
+		67: {
+			ID: 67, Name: "MLOG_REC_INSERT", Category: "Record Operations (Current)",
+			Description: "Insert record (current format)",
+			Format: `[cyan]═══ MLOG_REC_INSERT Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x43)
+• Space ID: Compressed (1-5 bytes)
+• Page No:  Compressed (1-5 bytes)
+
+[yellow]Index Info Section:[white]
+• Has Index Info: 1 bit flag
+• N_uniq:        Compressed (if flag set)
+• N_fields:      Compressed (if flag set)
+• Field Types:   Variable array
+
+[yellow]Record Section:[white]
+• Cursor Position: 2 bytes
+• Record Size:     Compressed
+• Extra Size:      1 byte
+• Info & Status:   1 byte
+• Record Data:     Variable
+
+[yellow]Record Data Format:[white]
+• Null bitmap:     (n_fields + 7) / 8 bytes
+• Variable lengths: For each VARCHAR/BLOB
+• Field data:      Actual column values
+
+[green]Optimizations:[white]
+• Instant ADD COLUMN support
+• Online DDL compatibility
+• Compressed metadata
+
+[gray]Current format since MySQL 8.0.28[white]`,
+		},
+		70: {
+			ID: 70, Name: "MLOG_REC_UPDATE_IN_PLACE", Category: "Record Operations (Current)",
+			Description: "Update record in place",
+			Format: `[cyan]═══ MLOG_REC_UPDATE_IN_PLACE Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x46)
+• Space ID: Compressed (1-5 bytes)
+• Page No:  Compressed (1-5 bytes)
+
+[yellow]Update Info:[white]
+• Flags:          1 byte
+• Cursor Offset:  2 bytes
+• Update Count:   Compressed
+
+[yellow]Update Vectors:[white]
+For each field update:
+• Field Number:   Compressed
+• Field Length:   Compressed  
+• Field Data:     Variable
+
+[yellow]Special Flags:[white]
+• 0x01: Update affects indexed columns
+• 0x02: Update changes row format
+• 0x04: Update is partial (BLOB)
+
+[green]Optimized for:[white]
+• Minimal logging of changes
+• Efficient replay during recovery
+• Support for partial BLOB updates
+
+[gray]Only logs changed fields, not entire record[white]`,
+		},
+		69: {
+			ID: 69, Name: "MLOG_REC_DELETE", Category: "Record Operations (Current)",
+			Description: "Delete record",
+			Format: `[cyan]═══ MLOG_REC_DELETE Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x45)
+• Space ID: Compressed (1-5 bytes)
+• Page No:  Compressed (1-5 bytes)
+
+[yellow]Body:[white]
+• Cursor Offset:   2 bytes
+• Record Size:     Compressed
+
+[yellow]Delete Info:[white]
+• Will be Purged:  1 bit flag
+• Has Undo Info:   1 bit flag
+• Transaction ID:  6 bytes (if has undo)
+• Undo Number:     Compressed (if has undo)
+
+[green]Process:[white]
+1. Record is marked deleted (not removed)
+2. Purge thread removes later
+3. Space reclaimed during page reorganize
+
+[gray]Two-phase delete for MVCC consistency[white]`,
+		},
+
+		// Page operations
+		19: {
+			ID: 19, Name: "MLOG_PAGE_CREATE", Category: "Page Operations",
+			Description: "Create an index page",
+			Format: `[cyan]═══ MLOG_PAGE_CREATE Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x13)
+• Space ID: Compressed (1-5 bytes)
+• Page No:  Compressed (1-5 bytes)
+
+[yellow]Page Info:[white]
+• Page Type:    1 byte
+• Index ID:     8 bytes
+• Page Level:   2 bytes
+
+[yellow]Page Types:[white]
+• 0x45BD: B-tree node
+• 0x45BF: B-tree leaf  
+• 0x0002: Undo log page
+• 0x0003: Inode page
+• 0x0004: Insert buffer free list
+• 0x0005: Insert buffer bitmap
+• 0x0006: System page
+• 0x0007: Transaction system
+• 0x0008: BLOB page
+
+[green]Initializes:[white]
+• Page header (38 bytes)
+• Page trailer (8 bytes)
+• Infimum and supremum records
+
+[gray]Creates new page in buffer pool[white]`,
+		},
+		72: {
+			ID: 72, Name: "MLOG_PAGE_REORGANIZE", Category: "Page Operations",
+			Description: "Reorganize page",
+			Format: `[cyan]═══ MLOG_PAGE_REORGANIZE Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x48)
+• Space ID: Compressed (1-5 bytes)
+• Page No:  Compressed (1-5 bytes)
+
+[yellow]Reorganize Info:[white]
+• Has Index Info: 1 bit
+• Is Compressed:  1 bit
+• Index Info:     Variable (if flag set)
+
+[green]Purpose:[white]
+• Defragments page
+• Reclaims deleted record space
+• Optimizes record storage
+• Rebuilds page directory
+
+[yellow]Process:[white]
+1. Copy all valid records to temp
+2. Clear page body
+3. Re-insert records optimally
+4. Update page header stats
+
+[gray]Triggered when page becomes fragmented[white]`,
+		},
+
+		// Transaction operations
+		31: {
+			ID: 31, Name: "MLOG_MULTI_REC_END", Category: "Transaction Control",
+			Description: "Multi-record group end marker",
+			Format: `[cyan]═══ MLOG_MULTI_REC_END Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x1F)
+• Length:   0 (no body)
+
+[green]Purpose:[white]
+• Marks end of atomic operation group
+• All records since group start must succeed
+• Used for multi-statement transactions
+
+[yellow]Group Structure:[white]
+Record 1 (group start)
+Record 2  
+Record 3
+...
+MLOG_MULTI_REC_END (this record)
+
+[gray]Ensures atomicity during recovery[white]`,
+		},
+
+		// File operations
+		33: {
+			ID: 33, Name: "MLOG_FILE_CREATE", Category: "File Operations",
+			Description: "File create",
+			Format: `[cyan]═══ MLOG_FILE_CREATE Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x21)
+• Length:   Variable
+
+[yellow]Body:[white]
+• Space ID:       4 bytes
+• Tablespace Flags: 4 bytes
+• File Name Len:  2 bytes
+• File Name:      Variable string
+
+[yellow]Tablespace Flags Include:[white]
+• Page size (3 bits)
+• Compressed flag (1 bit)
+• Encryption flag (1 bit)
+• Shared tablespace (1 bit)
+
+[green]Creates:[white]
+• New .ibd file
+• Initial file pages
+• Metadata structures
+
+[gray]Logged before physical file creation[white]`,
+		},
+
+		// Special operations
+		30: {
+			ID: 30, Name: "MLOG_WRITE_STRING", Category: "Page Operations",
+			Description: "Write a string to a page",
+			Format: `[cyan]═══ MLOG_WRITE_STRING Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x1E)
+• Space ID: Compressed (1-5 bytes)
+• Page No:  Compressed (1-5 bytes)
+
+[yellow]Body:[white]
+• Page Offset: 2 bytes
+• String Len:  2 bytes
+• String Data: Variable bytes
+
+[green]Usage:[white]
+• Write arbitrary data to page
+• Update page headers
+• Modify system records
+• Used when other types don't fit
+
+[gray]Generic write operation[white]`,
+		},
+		62: {
+			ID: 62, Name: "MLOG_TABLE_DYNAMIC_META", Category: "Metadata Operations",
+			Description: "Dynamic table metadata",
+			Format: `[cyan]═══ MLOG_TABLE_DYNAMIC_META Format ═══[white]
+
+[yellow]Header:[white]
+• Type:     1 byte  (0x3E)
+• Length:   Variable
+
+[yellow]Body:[white]
+• Table ID:      8 bytes
+• Version:       8 bytes  
+• Metadata Type: 1 byte
+• Metadata Len:  Compressed
+• Metadata:      Variable
+
+[yellow]Metadata Types:[white]
+• 0x01: Corrupted flag
+• 0x02: Auto-increment value
+• 0x04: Statistics version
+• 0x08: Instant column info
+
+[green]Instant ADD COLUMN Support:[white]
+• Column count
+• Default values
+• Column positions
+
+[gray]Enables online DDL operations[white]`,
+		},
+	}
+}
+
 // initializeReference initializes the reference modal
 func (app *RedoLogApp) initializeReference() {
-	// Create reference text view
-	app.referenceView = tview.NewTextView()
-	app.referenceView.SetDynamicColors(true)
-	app.referenceView.SetScrollable(true)
-	app.referenceView.SetWrap(true)
-	app.referenceView.SetWordWrap(true)
+	// Create reference list (clickable items)
+	app.referenceView = tview.NewList()
 	app.referenceView.SetBorder(true)
-	app.referenceView.SetTitle(" InnoDB Redo Log Type Reference ")
+	app.referenceView.SetTitle(" InnoDB Redo Log Type Reference - Click or Enter to see details ")
+	app.referenceView.ShowSecondaryText(true)
 	
-	// Set the reference content
-	app.referenceView.SetText(app.getReferenceContent())
+	// Get type information
+	typeInfoMap := getTypeInfoMap()
+	
+	// Add categories and their types
+	categories := []struct {
+		name  string
+		types []uint8
+	}{
+		{"Basic Byte Operations", []uint8{1, 2, 4, 8}},
+		{"Record Operations (Old Format)", []uint8{9, 10, 11, 13, 14, 15, 16, 17, 18}},
+		{"Page and Undo Operations", []uint8{19, 20, 21, 22, 24, 25, 26, 27, 28, 29, 30}},
+		{"Transaction Control", []uint8{31, 32}},
+		{"File Operations", []uint8{33, 34, 35}},
+		{"Compressed Record Operations", []uint8{36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46}},
+		{"ZIP Page Operations", []uint8{48, 49, 50, 51, 52, 53}},
+		{"R-Tree Operations", []uint8{57, 58}},
+		{"Special Operations", []uint8{59, 61}},
+		{"Metadata Operations", []uint8{62}},
+		{"SDI Operations", []uint8{63, 64}},
+		{"Extended Operations", []uint8{65, 66}},
+		{"Record Operations (Current)", []uint8{67, 68, 69, 70, 71, 72, 73, 74, 75, 76}},
+	}
+	
+	// Add category headers and types
+	for _, category := range categories {
+		// Add category header
+		app.referenceView.AddItem(fmt.Sprintf("[yellow]▶ %s[white]", category.name), "", 0, nil)
+		
+		// Add types in category
+		for _, typeID := range category.types {
+			if info, exists := typeInfoMap[typeID]; exists {
+				mainText := fmt.Sprintf("  [green]%s (%d)[white]", info.Name, info.ID)
+				secondaryText := fmt.Sprintf("[gray]%s[white]", info.Description)
+				
+				// Capture typeID in closure
+				func(capturedTypeID uint8) {
+					app.referenceView.AddItem(mainText, secondaryText, 0, func() {
+						app.showTypeDetail(capturedTypeID)
+					})
+				}(typeID)
+			} else {
+				// Handle missing types with basic info from types package
+				logType := types.LogType(typeID)
+				mainText := fmt.Sprintf("  [gray]%s (%d)[white]", logType.String(), typeID)
+				secondaryText := "[gray]No detailed format available[white]"
+				
+				func(capturedTypeID uint8) {
+					app.referenceView.AddItem(mainText, secondaryText, 0, func() {
+						app.showBasicTypeInfo(capturedTypeID)
+					})
+				}(typeID)
+			}
+		}
+	}
 	
 	// Create reference modal (flex container)
 	app.referenceModal = tview.NewFlex().SetDirection(tview.FlexRow)
@@ -1341,7 +1775,7 @@ func (app *RedoLogApp) initializeReference() {
 	// Add close instructions
 	closeInstructions := tview.NewTextView()
 	closeInstructions.SetDynamicColors(true)
-	closeInstructions.SetText("[yellow]Press ESC or 'q' to close this reference[white]")
+	closeInstructions.SetText("[yellow]Press ESC/'q' to close • Enter/Click to see type details • ↑/↓ to navigate[white]")
 	closeInstructions.SetTextAlign(tview.AlignCenter)
 	
 	app.referenceModal.AddItem(closeInstructions, 1, 0, false)
@@ -1369,6 +1803,120 @@ func (app *RedoLogApp) showReferenceModal() {
 	app.app.SetFocus(app.referenceView)
 }
 
+// initializeTypeDetail initializes the type detail modal
+func (app *RedoLogApp) initializeTypeDetail() {
+	// Create type detail text view
+	app.typeDetailView = tview.NewTextView()
+	app.typeDetailView.SetDynamicColors(true)
+	app.typeDetailView.SetScrollable(true)
+	app.typeDetailView.SetWrap(true)
+	app.typeDetailView.SetWordWrap(true)
+	app.typeDetailView.SetBorder(true)
+	app.typeDetailView.SetTitle(" Type Format Details ")
+	
+	// Create type detail modal (flex container)
+	app.typeDetailModal = tview.NewFlex().SetDirection(tview.FlexRow)
+	
+	// Add navigation instructions
+	navInstructions := tview.NewTextView()
+	navInstructions.SetDynamicColors(true)
+	navInstructions.SetText("[yellow]Press ESC/'b' to go back to reference • 'q' to close reference entirely[white]")
+	navInstructions.SetTextAlign(tview.AlignCenter)
+	
+	app.typeDetailModal.AddItem(navInstructions, 1, 0, false)
+	app.typeDetailModal.AddItem(app.typeDetailView, 0, 1, true)
+	
+	// Set up key handlers for the type detail view
+	app.typeDetailView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape || event.Rune() == 'b' || event.Rune() == 'B' {
+			app.hideTypeDetailModal()
+			return nil
+		}
+		if event.Rune() == 'q' || event.Rune() == 'Q' {
+			app.hideReferenceModal() // Close entire reference system
+			return nil
+		}
+		return event
+	})
+}
+
+// showTypeDetail shows detailed format information for a specific type
+func (app *RedoLogApp) showTypeDetail(typeID uint8) {
+	// Initialize type detail if not already done
+	if app.typeDetailView == nil {
+		app.initializeTypeDetail()
+	}
+	
+	// Get type information
+	typeInfoMap := getTypeInfoMap()
+	if info, exists := typeInfoMap[typeID]; exists {
+		app.typeDetailView.SetText(info.Format)
+		app.typeDetailView.SetTitle(fmt.Sprintf(" %s - Format Details ", info.Name))
+	} else {
+		app.showBasicTypeInfo(typeID)
+		return
+	}
+	
+	// Show the type detail modal
+	app.app.SetRoot(app.typeDetailModal, true)
+	app.app.SetFocus(app.typeDetailView)
+}
+
+// showBasicTypeInfo shows basic info for types without detailed format info
+func (app *RedoLogApp) showBasicTypeInfo(typeID uint8) {
+	// Initialize type detail if not already done
+	if app.typeDetailView == nil {
+		app.initializeTypeDetail()
+	}
+	
+	logType := types.LogType(typeID)
+	basicInfo := fmt.Sprintf(`[cyan]═══ %s ═══[white]
+
+[yellow]Type ID:[white] %d (0x%02X)
+[yellow]Name:[white] %s
+[yellow]Category:[white] %s
+
+[green]Basic Information:[white]
+This is a MySQL 8.0 InnoDB redo log record type.
+
+[gray]Detailed format information is not available for this type.
+This may be because:[white]
+• [gray]It's a rarely used or internal type[white]
+• [gray]It has a simple format similar to other basic operations[white]
+• [gray]Format documentation is not yet implemented[white]
+
+[yellow]General Structure:[white]
+All redo log records follow this basic pattern:
+• [cyan]Type[white] (1 byte) - The MLOG type identifier
+• [cyan]Length[white] (1-5 bytes) - Compressed record length  
+• [cyan]Space ID[white] (1-5 bytes) - Tablespace identifier
+• [cyan]Page No[white] (1-5 bytes) - Page number within tablespace
+• [cyan]Body[white] (Variable) - Type-specific data
+
+[gray]For accurate format details, refer to MySQL source code or documentation.[white]
+`, logType.String(), typeID, typeID, logType.String(), 
+		func() string {
+			if logType.IsTransactional() {
+				return "Transactional Operation"
+			}
+			return "Non-transactional Operation"
+		}())
+	
+	app.typeDetailView.SetText(basicInfo)
+	app.typeDetailView.SetTitle(fmt.Sprintf(" %s - Basic Info ", logType.String()))
+	
+	// Show the type detail modal
+	app.app.SetRoot(app.typeDetailModal, true)
+	app.app.SetFocus(app.typeDetailView)
+}
+
+// hideTypeDetailModal hides the type detail modal and returns to reference view
+func (app *RedoLogApp) hideTypeDetailModal() {
+	// Return to reference modal
+	app.app.SetRoot(app.referenceModal, true)
+	app.app.SetFocus(app.referenceView)
+}
+
 // hideReferenceModal hides the reference modal and returns to main view
 func (app *RedoLogApp) hideReferenceModal() {
 	// Return to main layout
@@ -1388,128 +1936,6 @@ func (app *RedoLogApp) hideReferenceModal() {
 	app.app.SetFocus(app.recordList)
 }
 
-// getReferenceContent returns the reference documentation content
-func (app *RedoLogApp) getReferenceContent() string {
-	return `[yellow]═══════════════════════════════════════════════════════════════════════════════[white]
-[cyan]                    MySQL 8.0 InnoDB Redo Log Record Types                     [white]
-[yellow]═══════════════════════════════════════════════════════════════════════════════[white]
-
-[green]■ Overview[white]
-MySQL 8.0 has 65 types of redo log records divided into three main categories:
-
-1. [cyan]REDO for Page[white] - The majority of redo log types
-2. [cyan]REDO for Space[white] - Tablespace-level operations  
-3. [cyan]Logic Type[white] - Additional information records
-
-[green]■ Basic Byte Operations (Types 1-8)[white]
-[yellow]MLOG_1BYTE (1)[white]    - Write 1 byte to a page
-[yellow]MLOG_2BYTES (2)[white]   - Write 2 bytes to a page
-[yellow]MLOG_4BYTES (4)[white]   - Write 4 bytes to a page
-[yellow]MLOG_8BYTES (8)[white]   - Write 8 bytes to a page
-
-[green]■ Record Operations - Old Format 8027 (Types 9-18)[white]
-[yellow]MLOG_REC_INSERT_8027 (9)[white]                  - Insert a record (old format)
-[yellow]MLOG_REC_CLUST_DELETE_MARK_8027 (10)[white]     - Mark clustered index record for deletion
-[yellow]MLOG_REC_SEC_DELETE_MARK (11)[white]            - Mark secondary index record for deletion
-[yellow]MLOG_REC_UPDATE_IN_PLACE_8027 (13)[white]       - Update record in place
-[yellow]MLOG_REC_DELETE_8027 (14)[white]                - Delete a record
-[yellow]MLOG_LIST_END_DELETE_8027 (15)[white]           - Delete from list end
-[yellow]MLOG_LIST_START_DELETE_8027 (16)[white]         - Delete from list start
-[yellow]MLOG_LIST_END_COPY_CREATED_8027 (17)[white]     - Copy created to list end
-[yellow]MLOG_PAGE_REORGANIZE_8027 (18)[white]           - Reorganize page
-
-[green]■ Page and Undo Operations (Types 19-32)[white]
-[yellow]MLOG_PAGE_CREATE (19)[white]         - Create an index page
-[yellow]MLOG_UNDO_INSERT (20)[white]         - Insert undo log record
-[yellow]MLOG_UNDO_ERASE_END (21)[white]      - Erase an undo page end
-[yellow]MLOG_UNDO_INIT (22)[white]           - Initialize a page in undo log
-[yellow]MLOG_UNDO_HDR_REUSE (24)[white]      - Reuse an undo log header
-[yellow]MLOG_UNDO_HDR_CREATE (25)[white]     - Create an undo log header
-[yellow]MLOG_REC_MIN_MARK (26)[white]        - Mark record as min in page
-[yellow]MLOG_IBUF_BITMAP_INIT (27)[white]    - Initialize insert buffer bitmap
-[yellow]MLOG_LSN (28)[white]                 - Write LSN
-[yellow]MLOG_INIT_FILE_PAGE (29)[white]      - Initialize a file page
-[yellow]MLOG_WRITE_STRING (30)[white]        - Write a string to a page
-[yellow]MLOG_MULTI_REC_END (31)[white]       - Multi-record group end marker
-[yellow]MLOG_DUMMY_RECORD (32)[white]        - Dummy log record
-
-[green]■ File Operations (Types 33-35)[white]
-[yellow]MLOG_FILE_CREATE (33)[white]   - File create
-[yellow]MLOG_FILE_RENAME (34)[white]   - File rename  
-[yellow]MLOG_FILE_DELETE (35)[white]   - File delete
-
-[green]■ Compressed Record Operations (Types 36-46)[white]
-[yellow]MLOG_COMP_REC_MIN_MARK (36)[white]                  - Compressed page min mark
-[yellow]MLOG_COMP_PAGE_CREATE (37)[white]                   - Create compressed page
-[yellow]MLOG_COMP_REC_INSERT_8027 (38)[white]               - Insert in compressed page
-[yellow]MLOG_COMP_REC_CLUST_DELETE_MARK_8027 (39)[white]   - Delete mark in compressed clustered
-[yellow]MLOG_COMP_REC_SEC_DELETE_MARK (40)[white]          - Delete mark in compressed secondary
-[yellow]MLOG_COMP_REC_UPDATE_IN_PLACE_8027 (41)[white]     - Update compressed in place
-[yellow]MLOG_COMP_REC_DELETE_8027 (42)[white]               - Delete from compressed page
-[yellow]MLOG_COMP_LIST_END_DELETE_8027 (43)[white]         - Delete from compressed list end
-[yellow]MLOG_COMP_LIST_START_DELETE_8027 (44)[white]       - Delete from compressed list start
-[yellow]MLOG_COMP_LIST_END_COPY_CREATED_8027 (45)[white]   - Copy to compressed list end
-[yellow]MLOG_COMP_PAGE_REORGANIZE_8027 (46)[white]         - Reorganize compressed page
-
-[green]■ ZIP Page Operations (Types 48-53)[white]
-[yellow]MLOG_ZIP_WRITE_NODE_PTR (48)[white]            - Write node pointer of compressed page
-[yellow]MLOG_ZIP_WRITE_BLOB_PTR (49)[white]            - Write BLOB pointer of compressed page
-[yellow]MLOG_ZIP_WRITE_HEADER (50)[white]              - Write compressed page header
-[yellow]MLOG_ZIP_PAGE_COMPRESS (51)[white]             - Compress a page
-[yellow]MLOG_ZIP_PAGE_COMPRESS_NO_DATA_8027 (52)[white] - Page compress no data (old)
-[yellow]MLOG_ZIP_PAGE_REORGANIZE_8027 (53)[white]      - Reorganize compressed page (old)
-
-[green]■ R-Tree Operations (Types 57-58)[white]
-[yellow]MLOG_PAGE_CREATE_RTREE (57)[white]        - Create R-tree page
-[yellow]MLOG_COMP_PAGE_CREATE_RTREE (58)[white]   - Create compressed R-tree page
-
-[green]■ Special Operations (Types 59-66)[white]
-[yellow]MLOG_INIT_FILE_PAGE2 (59)[white]        - Initialize file page (version 2)
-[yellow]MLOG_INDEX_LOAD (61)[white]             - Index load operation
-[yellow]MLOG_TABLE_DYNAMIC_META (62)[white]     - Dynamic table metadata
-[yellow]MLOG_PAGE_CREATE_SDI (63)[white]        - Create SDI page
-[yellow]MLOG_COMP_PAGE_CREATE_SDI (64)[white]   - Create compressed SDI page
-[yellow]MLOG_FILE_EXTEND (65)[white]            - Extend file
-[yellow]MLOG_TEST (66)[white]                   - Test record
-
-[green]■ Current Format Record Operations (Types 67-76)[white]
-[yellow]MLOG_REC_INSERT (67)[white]             - Insert record (current format)
-[yellow]MLOG_REC_CLUST_DELETE_MARK (68)[white] - Mark clustered index record for deletion
-[yellow]MLOG_REC_DELETE (69)[white]             - Delete record
-[yellow]MLOG_REC_UPDATE_IN_PLACE (70)[white]   - Update record in place
-[yellow]MLOG_LIST_END_COPY_CREATED (71)[white] - Copy created to list end
-[yellow]MLOG_PAGE_REORGANIZE (72)[white]        - Reorganize page
-[yellow]MLOG_ZIP_PAGE_REORGANIZE (73)[white]    - Reorganize compressed page
-[yellow]MLOG_ZIP_PAGE_COMPRESS_NO_DATA (74)[white] - Page compress no data
-[yellow]MLOG_LIST_END_DELETE (75)[white]        - Delete from list end
-[yellow]MLOG_LIST_START_DELETE (76)[white]      - Delete from list start
-
-[yellow]═══════════════════════════════════════════════════════════════════════════════[white]
-[green]■ Record Format Details[white]
-
-Each redo log record contains:
-• [cyan]Type[white] - The MLOG type (1-76)
-• [cyan]Space ID[white] - Tablespace identifier
-• [cyan]Page Number[white] - Page within tablespace
-• [cyan]Body[white] - Type-specific data
-
-[green]■ Physiological Logging[white]
-InnoDB uses physiological logging - a hybrid approach:
-• [cyan]Physical[white] at the page level (Page ID specifies the page)
-• [cyan]Logical[white] within the page (operations described logically)
-
-Example for MLOG_REC_UPDATE_IN_PLACE:
-  [yellow]Page ID[white], [yellow]Record Offset[white], ([yellow]Field 1[white], [yellow]Value 1[white]) ... ([yellow]Field N[white], [yellow]Value N[white])
-
-[green]■ Multi-Record Groups[white]
-Complex operations use multi-record groups:
-• Group starts with first record of the operation
-• Group ends with [cyan]MLOG_MULTI_REC_END (31)[white]
-• All records in group must be applied atomically
-
-[yellow]═══════════════════════════════════════════════════════════════════════════════[white]
-`
-}
 
 func (app *RedoLogApp) Run() error {
 	// Create main layout with footer
