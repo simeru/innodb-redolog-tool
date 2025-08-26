@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,10 +35,10 @@ type RedoLogApp struct {
 	footer        *tview.TextView
 	searchInput   *tview.InputField
 	searchModal   *tview.Modal
-	referenceView *tview.List  // Changed to List for clickable items
-	referenceModal *tview.Flex
-	typeDetailView *tview.TextView
-	typeDetailModal *tview.Flex
+	referenceView *tview.List  // Left pane: type list
+	referenceModal *tview.Flex // Reference main layout
+	typeDetailView *tview.TextView // Right pane: type details
+	referenceDetailPane *tview.Flex // Right pane container
 	records       []*types.LogRecord
 	filteredRecords []*types.LogRecord
 	recordIndices []int // Maps filtered index to original index
@@ -1811,13 +1812,44 @@ For each field update:
 	}
 }
 
-// initializeReference initializes the reference modal
+// initializeReference initializes the reference modal with left-right pane layout
 func (app *RedoLogApp) initializeReference() {
-	// Create reference list (clickable items)
+	// Create left pane - reference list (clickable items)
 	app.referenceView = tview.NewList()
 	app.referenceView.SetBorder(true)
-	app.referenceView.SetTitle(" InnoDB Redo Log Type Reference - Click or Enter to see details ")
+	app.referenceView.SetTitle(" Redo Log Types ")
 	app.referenceView.ShowSecondaryText(true)
+	
+	// Create right pane - type detail view
+	app.typeDetailView = tview.NewTextView()
+	app.typeDetailView.SetDynamicColors(true)
+	app.typeDetailView.SetScrollable(true)
+	app.typeDetailView.SetWrap(true)
+	app.typeDetailView.SetWordWrap(true)
+	app.typeDetailView.SetBorder(true)
+	app.typeDetailView.SetTitle(" Type Details ")
+	
+	// Set initial content for right pane
+	app.typeDetailView.SetText(`[cyan]═══ InnoDB Redo Log Type Reference ═══[white]
+
+[yellow]Welcome to the Type Reference![white]
+
+Select a type from the left panel to view its detailed format information.
+
+[green]Navigation:[white]
+• [cyan]↑/↓[white] - Navigate type list
+• [cyan]Enter[white] - Show type details
+• [cyan]Tab[white] - Switch between panes
+• [cyan]ESC/q[white] - Close reference
+• [cyan]r[white] - Toggle reference
+
+[yellow]About 512-byte Blocks:[white]
+InnoDB redo log records are stored in 512-byte blocks with:
+• [cyan]Block Header[white] (12 bytes) - Block metadata
+• [cyan]Data Area[white] (496 bytes) - Redo log records  
+• [cyan]Block Trailer[white] (4 bytes) - Checksum
+
+Each type shows detailed byte-level formatting within this structure.`)
 	
 	// Get type information
 	typeInfoMap := getTypeInfoMap()
@@ -1856,7 +1888,7 @@ func (app *RedoLogApp) initializeReference() {
 				// Capture typeID in closure
 				func(capturedTypeID uint8) {
 					app.referenceView.AddItem(mainText, secondaryText, 0, func() {
-						app.showTypeDetail(capturedTypeID)
+						app.updateTypeDetailPane(capturedTypeID)
 					})
 				}(typeID)
 			} else {
@@ -1867,28 +1899,66 @@ func (app *RedoLogApp) initializeReference() {
 				
 				func(capturedTypeID uint8) {
 					app.referenceView.AddItem(mainText, secondaryText, 0, func() {
-						app.showBasicTypeInfo(capturedTypeID)
+						app.updateTypeDetailPane(capturedTypeID)
 					})
 				}(typeID)
 			}
 		}
 	}
 	
-	// Create reference modal (flex container)
+	// Create main reference layout (left-right panes)
+	mainReferenceLayout := tview.NewFlex()
+	mainReferenceLayout.AddItem(app.referenceView, 0, 1, true)        // Left pane (1/3)
+	mainReferenceLayout.AddItem(app.typeDetailView, 0, 2, false)      // Right pane (2/3)
+	
+	// Create reference modal with instructions and main layout
 	app.referenceModal = tview.NewFlex().SetDirection(tview.FlexRow)
 	
-	// Add close instructions
-	closeInstructions := tview.NewTextView()
-	closeInstructions.SetDynamicColors(true)
-	closeInstructions.SetText("[yellow]Press ESC/'q' to close • Enter/Click to see type details • ↑/↓ to navigate[white]")
-	closeInstructions.SetTextAlign(tview.AlignCenter)
+	// Add navigation instructions
+	instructions := tview.NewTextView()
+	instructions.SetDynamicColors(true)
+	instructions.SetText("[yellow]Navigation: ↑/↓=Navigate • Enter=Select • Tab=Switch Panes • ESC/q=Close • r=Toggle[white]")
+	instructions.SetTextAlign(tview.AlignCenter)
 	
-	app.referenceModal.AddItem(closeInstructions, 1, 0, false)
-	app.referenceModal.AddItem(app.referenceView, 0, 1, true)
+	app.referenceModal.AddItem(instructions, 1, 0, false)
+	app.referenceModal.AddItem(mainReferenceLayout, 0, 1, true)
+	
+	// Set up selection change handler to auto-update right pane
+	app.referenceView.SetChangedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
+		// Extract type ID from mainText and update details
+		app.handleReferenceSelection(mainText)
+	})
 	
 	// Set up key handlers for the reference view
 	app.referenceView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEscape || event.Rune() == 'q' || event.Rune() == 'Q' || event.Rune() == 'r' || event.Rune() == 'R' {
+		switch event.Key() {
+		case tcell.KeyEscape:
+			app.hideReferenceModal()
+			return nil
+		case tcell.KeyTab:
+			app.app.SetFocus(app.typeDetailView)
+			return nil
+		}
+		
+		if event.Rune() == 'q' || event.Rune() == 'Q' || event.Rune() == 'r' || event.Rune() == 'R' {
+			app.hideReferenceModal()
+			return nil
+		}
+		return event
+	})
+	
+	// Set up key handlers for the type detail view
+	app.typeDetailView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyEscape:
+			app.hideReferenceModal()
+			return nil
+		case tcell.KeyTab:
+			app.app.SetFocus(app.referenceView)
+			return nil
+		}
+		
+		if event.Rune() == 'q' || event.Rune() == 'Q' || event.Rune() == 'r' || event.Rune() == 'R' {
 			app.hideReferenceModal()
 			return nil
 		}
@@ -1896,84 +1966,33 @@ func (app *RedoLogApp) initializeReference() {
 	})
 }
 
-// showReferenceModal displays the reference modal
-func (app *RedoLogApp) showReferenceModal() {
-	// Initialize reference if not already done
-	if app.referenceView == nil {
-		app.initializeReference()
-	}
+// handleReferenceSelection handles selection change in the reference list
+func (app *RedoLogApp) handleReferenceSelection(mainText string) {
+	// Extract type ID from mainText using regex
+	re := regexp.MustCompile(`\((\d+)\)`)
+	matches := re.FindStringSubmatch(mainText)
 	
-	// Show the reference modal
-	app.app.SetRoot(app.referenceModal, true)
-	app.app.SetFocus(app.referenceView)
+	if len(matches) > 1 {
+		// Parse type ID
+		if typeID, err := strconv.ParseUint(matches[1], 10, 8); err == nil {
+			app.updateTypeDetailPane(uint8(typeID))
+		}
+	}
 }
 
-// initializeTypeDetail initializes the type detail modal
-func (app *RedoLogApp) initializeTypeDetail() {
-	// Create type detail text view
-	app.typeDetailView = tview.NewTextView()
-	app.typeDetailView.SetDynamicColors(true)
-	app.typeDetailView.SetScrollable(true)
-	app.typeDetailView.SetWrap(true)
-	app.typeDetailView.SetWordWrap(true)
-	app.typeDetailView.SetBorder(true)
-	app.typeDetailView.SetTitle(" Type Format Details ")
-	
-	// Create type detail modal (flex container)
-	app.typeDetailModal = tview.NewFlex().SetDirection(tview.FlexRow)
-	
-	// Add navigation instructions
-	navInstructions := tview.NewTextView()
-	navInstructions.SetDynamicColors(true)
-	navInstructions.SetText("[yellow]Press ESC/'b' to go back to reference • 'q' to close reference entirely[white]")
-	navInstructions.SetTextAlign(tview.AlignCenter)
-	
-	app.typeDetailModal.AddItem(navInstructions, 1, 0, false)
-	app.typeDetailModal.AddItem(app.typeDetailView, 0, 1, true)
-	
-	// Set up key handlers for the type detail view
-	app.typeDetailView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEscape || event.Rune() == 'b' || event.Rune() == 'B' {
-			app.hideTypeDetailModal()
-			return nil
-		}
-		if event.Rune() == 'q' || event.Rune() == 'Q' {
-			app.hideReferenceModal() // Close entire reference system
-			return nil
-		}
-		return event
-	})
-}
-
-// showTypeDetail shows detailed format information for a specific type
-func (app *RedoLogApp) showTypeDetail(typeID uint8) {
-	// Initialize type detail if not already done
-	if app.typeDetailView == nil {
-		app.initializeTypeDetail()
-	}
-	
-	// Get type information
+// updateTypeDetailPane updates the right pane with type details
+func (app *RedoLogApp) updateTypeDetailPane(typeID uint8) {
 	typeInfoMap := getTypeInfoMap()
 	if info, exists := typeInfoMap[typeID]; exists {
 		app.typeDetailView.SetText(info.Format)
 		app.typeDetailView.SetTitle(fmt.Sprintf(" %s - Format Details ", info.Name))
 	} else {
-		app.showBasicTypeInfo(typeID)
-		return
+		app.showBasicTypeInfoInPane(typeID)
 	}
-	
-	// Show the type detail modal
-	app.app.SetRoot(app.typeDetailModal, true)
-	app.app.SetFocus(app.typeDetailView)
 }
 
-// showBasicTypeInfo shows basic info for types without detailed format info
-func (app *RedoLogApp) showBasicTypeInfo(typeID uint8) {
-	// Initialize type detail if not already done
-	if app.typeDetailView == nil {
-		app.initializeTypeDetail()
-	}
-	
+// showBasicTypeInfoInPane shows basic info in the right pane for types without detailed format info
+func (app *RedoLogApp) showBasicTypeInfoInPane(typeID uint8) {
 	logType := types.LogType(typeID)
 	basicInfo := fmt.Sprintf(`[cyan]═══ %s ═══[white]
 
@@ -2009,18 +2028,20 @@ All redo log records follow this basic pattern:
 	
 	app.typeDetailView.SetText(basicInfo)
 	app.typeDetailView.SetTitle(fmt.Sprintf(" %s - Basic Info ", logType.String()))
-	
-	// Show the type detail modal
-	app.app.SetRoot(app.typeDetailModal, true)
-	app.app.SetFocus(app.typeDetailView)
 }
 
-// hideTypeDetailModal hides the type detail modal and returns to reference view
-func (app *RedoLogApp) hideTypeDetailModal() {
-	// Return to reference modal
+// showReferenceModal displays the reference modal
+func (app *RedoLogApp) showReferenceModal() {
+	// Initialize reference if not already done
+	if app.referenceView == nil {
+		app.initializeReference()
+	}
+	
+	// Show the reference modal
 	app.app.SetRoot(app.referenceModal, true)
 	app.app.SetFocus(app.referenceView)
 }
+
 
 // hideReferenceModal hides the reference modal and returns to main view
 func (app *RedoLogApp) hideReferenceModal() {
