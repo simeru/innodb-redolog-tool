@@ -728,15 +728,13 @@ Esc/q: Exit
 	app.detailsText.SetText(headerInfo)
 }
 
-func (app *RedoLogApp) showRecordDetails(index int) {
-	if index >= len(app.filteredRecords) {
-		return
-	}
-
-	record := app.filteredRecords[index]
-	originalIndex := app.recordIndices[index]
+// buildBlockFormatDisplay builds the 512-byte block format display for a record
+func (app *RedoLogApp) buildBlockFormatDisplay(record *types.LogRecord, originalIndex int) string {
+	// Get type-specific format info
+	typeID := uint8(record.Type)
+	typeName := record.Type.String()
 	
-	// Add group information to details
+	// Group information
 	var groupInfo string
 	if record.MultiRecordGroup > 0 {
 		groupStatus := ""
@@ -747,38 +745,165 @@ func (app *RedoLogApp) showRecordDetails(index int) {
 		} else {
 			groupStatus = " (Group Member)"
 		}
-		groupInfo = fmt.Sprintf("[green]Multi-Record Group:[white] %d%s\n", record.MultiRecordGroup, groupStatus)
+		groupInfo = fmt.Sprintf("\n[green]Multi-Record Group:[white] %d%s", record.MultiRecordGroup, groupStatus)
 	}
 	
-	details := fmt.Sprintf(`[yellow]Record %d Details[white]
+	// Calculate sizes for compressed fields (estimate)
+	spaceIDSize := app.getCompressedSize(uint32(record.SpaceID))
+	pageNoSize := app.getCompressedSize(uint32(record.PageNo))
+	lengthSize := app.getCompressedSize(uint32(record.Length))
+	
+	// Calculate record size in block
+	recordSize := 1 + lengthSize + spaceIDSize + pageNoSize + int(record.Length) // Type + compressed fields + data
+	blockUtilization := float64(recordSize) * 100 / 496 // 496 bytes data area
+	
+	// Build the block format display
+	blockDisplay := fmt.Sprintf(`[cyan]═══ Record %d: %s ═══[white]
 
-[green]Type:[white]           %s
-[green]LSN:[white]            %d
-[green]Length:[white]         %d bytes
-[green]Transaction ID:[white] %d
-[green]Timestamp:[white]      %s
-[green]Space ID:[white]       %d
-[green]Table ID:[white]       %d
-[green]Index ID:[white]       %d
-[green]Page Number:[white]    %d
-[green]Offset:[white]         %d
-[green]Checksum:[white]       0x%08X
-%s
-[green]Data:[white]
+[yellow]512-Byte Block Structure:[white]
+[cyan]Block Header (12 bytes):[white]
+  Offset 0-3:   Block Number
+  Offset 4-5:   Data Length = %d
+  Offset 6-7:   First Record Group Offset
+  Offset 8-11:  Epoch Number
+
+[cyan]Record Data Area (496 bytes available):[white]
+[yellow]%s Record Structure:[white]
+  Byte 0:       Type = 0x%02X (%s)
+  Byte 1-%d:     Length = %d (compressed %d bytes)
+  Byte %d-%d:    Space ID = %d (compressed %d bytes)
+  Byte %d-%d:    Page Number = %d (compressed %d bytes)
 `,
 		originalIndex+1,
-		record.Type.String(),
-		record.LSN,
+		typeName,
 		record.Length,
-		record.TransactionID,
+		typeName,
+		typeID,
+		typeName,
+		lengthSize, record.Length, lengthSize,
+		1+lengthSize, 1+lengthSize+spaceIDSize-1, record.SpaceID, spaceIDSize,
+		1+lengthSize+spaceIDSize, 1+lengthSize+spaceIDSize+pageNoSize-1, record.PageNo, pageNoSize)
+	
+	// Add type-specific fields
+	currentByte := 1 + lengthSize + spaceIDSize + pageNoSize
+	
+	// Add record-specific fields based on type
+	switch typeID {
+	case 9, 38, 67: // Insert operations
+		blockDisplay += fmt.Sprintf(`  Byte %d-%d:   Cursor Position = %d (2 bytes)
+  Byte %d-%d:   Info & Status Bits (1 byte)
+  Byte %d-N:    Record Data (variable)
+                ├─ Transaction ID: %d
+                ├─ Table ID: %d
+                ├─ Index ID: %d
+                └─ Column Data
+`,
+			currentByte, currentByte+1, record.Offset,
+			currentByte+2, currentByte+2,
+			currentByte+3,
+			record.TransactionID,
+			record.TableID,
+			record.IndexID)
+			
+	case 13, 41, 70: // Update operations
+		blockDisplay += fmt.Sprintf(`  Byte %d-%d:   Cursor Position = %d (2 bytes)
+  Byte %d:      Update Flags (1 byte)
+  Byte %d-N:    Update Vectors
+                ├─ Transaction ID: %d
+                ├─ Table ID: %d
+                └─ Modified Fields
+`,
+			currentByte, currentByte+1, record.Offset,
+			currentByte+2,
+			currentByte+3,
+			record.TransactionID,
+			record.TableID)
+			
+	case 31: // MLOG_MULTI_REC_END
+		blockDisplay += `  (No additional fields - marker record)
+`
+		
+	default:
+		// Generic fields for other types
+		if record.Offset > 0 {
+			blockDisplay += fmt.Sprintf(`  Byte %d-%d:   Page Offset = %d (2 bytes)
+`, currentByte, currentByte+1, record.Offset)
+			currentByte += 2
+		}
+		if record.TransactionID > 0 {
+			blockDisplay += fmt.Sprintf(`  Byte %d-%d:   Transaction ID = %d (6 bytes)
+`, currentByte, currentByte+5, record.TransactionID)
+			currentByte += 6
+		}
+		if len(record.Data) > 0 {
+			blockDisplay += fmt.Sprintf(`  Byte %d-N:    Data Payload (%d bytes)
+`, currentByte, len(record.Data))
+		}
+	}
+	
+	// Add metadata and statistics
+	blockDisplay += fmt.Sprintf(`
+[yellow]Record Metadata:[white]
+  LSN:            %d
+  Timestamp:      %s
+  Checksum:       0x%08X%s
+  
+[cyan]Block Trailer (4 bytes):[white]
+  Offset 508-511: Checksum = 0x%08X
+
+[green]Size Analysis:[white]
+  Record Size:        %d bytes
+  Block Utilization:  %.1f%% of data area
+  Remaining Space:    %d bytes available
+`,
+		record.LSN,
 		record.Timestamp.Format("2006-01-02 15:04:05"),
-		record.SpaceID,
-		record.TableID,
-		record.IndexID,
-		record.PageNo,
-		record.Offset,
 		record.Checksum,
-		groupInfo)
+		groupInfo,
+		record.Checksum,
+		recordSize,
+		blockUtilization,
+		496-recordSize)
+	
+	// Add type hint
+	if record.Type.IsTransactional() {
+		blockDisplay += `
+[yellow]Type Category:[white] Transactional Operation
+`
+	}
+	
+	blockDisplay += `
+[cyan]═══ Record Data Details ═══[white]
+`
+	
+	return blockDisplay
+}
+
+// getCompressedSize estimates the size of a compressed integer
+func (app *RedoLogApp) getCompressedSize(value uint32) int {
+	if value < 128 {
+		return 1
+	} else if value < 16384 {
+		return 2
+	} else if value < 2097152 {
+		return 3
+	} else if value < 268435456 {
+		return 4
+	}
+	return 5
+}
+
+func (app *RedoLogApp) showRecordDetails(index int) {
+	if index >= len(app.filteredRecords) {
+		return
+	}
+
+	record := app.filteredRecords[index]
+	originalIndex := app.recordIndices[index]
+	
+	// Build 512-byte block format display
+	details := app.buildBlockFormatDisplay(record, originalIndex)
+	
 
 	if len(record.Data) > 0 {
 		details += app.formatRecordData(string(record.Data))
